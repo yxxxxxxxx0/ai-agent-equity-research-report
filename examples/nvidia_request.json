@@ -1,0 +1,23 @@
+{
+  "company": "NVIDIA",
+  "ticker": "NVDA",
+  "objective": "company update",
+  "sections": [
+    "company_snapshot",
+    "key_takeaways",
+    "recent_developments",
+    "financials",
+    "operating_drivers",
+    "competitive_landscape",
+    "valuation",
+    "risks",
+    "catalysts",
+    "what_matters_next",
+    "sources"
+  ],
+  "time_horizon": "latest",
+  "peers": [],
+  "focus": ["data centre demand", "gross margin trajectory"],
+  "report_date": "2026-09-02",
+  "raw_prompt": "Generate an equity research report on NVIDIA, focusing on the latest financial performance, operating drivers, valuation, competitive position, recent developments, risks, catalysts, and what investors should monitor next."
+}

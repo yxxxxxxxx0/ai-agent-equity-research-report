@@ -1,0 +1,12 @@
+# Runtime
+reportlab>=4.0          # PDF rendering
+requests>=2.31          # HTTP providers (market data, SEC filing fetch)
+pypdf>=4.0              # reading PDF filings (ArcticDB documents provider); test PDF assertions
+
+# Optional - only needed when EQR_ARCTICDB_URI is set
+arcticdb>=4.0           # ArcticDB acquisition providers
+
+# Development
+pytest>=8.0
+pytest-asyncio>=0.23
+ruff>=0.5

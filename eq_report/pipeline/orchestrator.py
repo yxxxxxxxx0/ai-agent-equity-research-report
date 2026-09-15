@@ -1,0 +1,430 @@
+"""Stage 11 - the pipeline orchestrator.
+
+One entry point, one pass through the architecture:
+
+    request -> plan
+            -> market data | fundamentals | documents   (concurrent)
+            -> normalisation
+            -> evidence store
+            -> analytics | segment agents               (agents concurrent)
+            -> synthesis
+            -> QA
+            -> PDF
+
+The orchestrator owns the wiring and the failure policy; it contains no
+analytical logic of its own. Every stage's output is written to the run
+directory so any point in the chain can be inspected afterwards.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Any
+
+from ..acquisition.services import AcquisitionBundle, acquire_all, build_services
+from ..agents.runner import run_segment_agents
+from ..analytics.engine import AnalyticsEngine
+from ..config import ModelConfig, Settings
+from ..domain.analytics import AnalyticsBundle
+from ..domain.enums import ProviderStatus, RunStatus
+from ..domain.plan import ResearchPlan
+from ..domain.qa import QAResult
+from ..domain.report import ReportDraft
+from ..domain.request import ResearchRequest
+from ..domain.run import ReportRun
+from ..domain.segment import SegmentResult
+from ..errors import PipelineError
+from ..evidence.reader import EvidenceReader
+from ..evidence.store import EvidenceStore
+from ..llm.usage import UsageTracker
+from ..logging_setup import configure_logging, get_logger, log_event
+from ..normalisation.normalizer import NormalisationResult, Normalizer
+from ..planning.research_planner import ResearchPlanner
+from ..qa.engine import QAEngine
+from ..rendering.json_writer import write_json, write_report_json, write_run_manifest
+from ..rendering.pdf_renderer import PdfReportRenderer
+from ..synthesis.annotate import build_annotations
+from ..synthesis.llm_synthesizer import LLMSynthesizer
+from ..synthesis.synthesizer import Synthesizer
+from .freshness_check import FreshnessResult, check_freshness
+from .gap_research import apply_gap_research, research_gaps
+from .run_tracker import RunTracker, new_run_id
+
+logger = get_logger("pipeline")
+
+
+@dataclass(frozen=True, slots=True)
+class ReportResult:
+    """What one pipeline invocation produced."""
+
+    report_run_id: str
+    status: RunStatus
+    run: ReportRun
+    draft: ReportDraft | None = None
+    qa_result: QAResult | None = None
+    pdf_path: Path | None = None
+    annotated_pdf_path: Path | None = None
+    report_json_path: Path | None = None
+    run_manifest_path: Path | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.status in {RunStatus.SUCCEEDED, RunStatus.SUCCEEDED_WITH_WARNINGS}
+
+    def summary(self) -> str:
+        parts = [f"run {self.report_run_id}", self.status.value]
+        if self.pdf_path:
+            parts.append(f"pdf={self.pdf_path}")
+        if self.annotated_pdf_path:
+            parts.append(f"annotated_pdf={self.annotated_pdf_path}")
+        if self.qa_result:
+            parts.append(
+                f"qa: {len(self.qa_result.critical)} critical, "
+                f"{len(self.qa_result.warnings)} warnings")
+        return " | ".join(parts)
+
+
+async def generate_report(
+    request: ResearchRequest,
+    settings: Settings | None = None,
+    *,
+    store: EvidenceStore | None = None,
+) -> ReportResult:
+    """Run the full pipeline for one research request.
+
+    ``store`` may be supplied by tests to use an in-memory Evidence Store; the
+    default opens the configured SQLite file.
+    """
+    settings = settings or Settings.from_env()
+    settings.ensure_dirs()
+    configure_logging(settings.log_level, as_json=settings.log_json)
+
+    report_run_id = new_run_id()
+    tracker = RunTracker(report_run_id, request.to_dict())
+    usage_tracker = UsageTracker()
+    run_dir = settings.run_dir(report_run_id)
+
+    owns_store = store is None
+    store = store or EvidenceStore(settings.database_path)
+
+    log_event(logger, logging.INFO, "report run started",
+              company=request.company, ticker=request.ticker,
+              sections=[s.value for s in request.sections],
+              settings=settings.describe())
+
+    try:
+        # 1. Planning ----------------------------------------------------
+        with tracker.stage("planning"):
+            # Planning is the only stage given its own reasoning-effort
+            # setting (see Settings.planning_reasoning_effort): the one call
+            # that shapes every downstream stage's scope. This is a copy of
+            # settings.model with only ``reasoning_effort`` changed - every
+            # other stage below still receives settings.model unmodified.
+            planning_model = (
+                replace(settings.model, reasoning_effort=settings.planning_reasoning_effort)
+                if settings.planning_reasoning_effort else settings.model
+            )
+            plan = await ResearchPlanner(planning_model, tracker=usage_tracker).plan(request)
+            tracker.set_plan(plan.to_dict())
+            for note in plan.notes:
+                tracker.warn(note)
+            write_json(run_dir / "01_plan.json", plan.to_dict())
+
+        # 2. Parallel acquisition ---------------------------------------
+        with tracker.stage("acquisition"):
+            market_service, fundamentals_service, documents_service = build_services(
+                settings, usage_tracker)
+            acquisition = await acquire_all(
+                plan, market_service, fundamentals_service, documents_service)
+            tracker.set_source_status(acquisition.to_dict())
+            tracker.errors(acquisition.errors)
+            if acquisition.used_mock_data:
+                tracker.warn(
+                    "One or more branches returned illustrative sample data from a mock "
+                    "provider. The report is labelled accordingly.")
+            _warn_on_dead_branches(tracker, acquisition)
+            write_json(run_dir / "02_acquisition.json", {"branches": acquisition.to_dict()})
+
+        # 3. Normalisation -----------------------------------------------
+        with tracker.stage("normalisation"):
+            normalised = await Normalizer(
+                report_run_id, plan, settings.model, tracker=usage_tracker
+            ).normalize(
+                acquisition.market_data.observations,
+                acquisition.fundamentals.observations,
+                acquisition.documents.passages,
+            )
+            _record_rejections(tracker, normalised)
+            write_json(run_dir / "03_normalisation.json", {
+                **normalised.to_dict(),
+                "evidence": [item.to_dict() for item in normalised.evidence],
+            })
+
+        # 4. Evidence store ----------------------------------------------
+        with tracker.stage("evidence_ingestion"):
+            written = store.save(normalised.evidence)
+            reader = EvidenceReader(
+                store=store, report_run_id=report_run_id,
+                ticker=plan.ticker, company=Normalizer(report_run_id, plan).company,
+            )
+            if written == 0:
+                tracker.warn("No evidence was written to the Evidence Store.")
+
+        # 4.5 Data freshness check (best-effort, opt-in) ------------------
+        # Runs here, before analysis or synthesis touch the evidence at all -
+        # "fix data freshness before anything else" - rather than as part of
+        # the later gap-research addendum, so a stale dataset is disclosed
+        # up front instead of discovered on the last page.
+        freshness = FreshnessResult(checked=False)
+        if settings.check_data_freshness and settings.model.enabled:
+            with tracker.stage("freshness_check"):
+                try:
+                    freshness = await check_freshness(
+                        reader.company, plan.ticker, plan.request.report_date,
+                        reader.latest_reported_period(), settings.model,
+                        tracker=usage_tracker,
+                    )
+                    if freshness.mismatched:
+                        tracker.warn(
+                            "Live verification found a more recent public report "
+                            f"({freshness.verified_period}) than this dataset is anchored "
+                            f"on ({reader.latest_reported_period()}); see the notice on "
+                            "page 1."
+                        )
+                except Exception as exc:  # noqa: BLE001 - never sink the run over this
+                    log_event(logger, logging.WARNING, "freshness check failed",
+                              error=f"{type(exc).__name__}: {exc}")
+                    tracker.warn(
+                        f"Data freshness check failed: {type(exc).__name__}: {exc}")
+
+        # 5. Analytics and segment agents --------------------------------
+        with tracker.stage("analysis"):
+            analytics, segment_results = await _run_analysis(
+                report_run_id, plan, reader, store, settings.model, usage_tracker)
+            tracker.set_counts(evidence=store.count(report_run_id),
+                               analytics=len(analytics.results))
+            tracker.set_agent_status([
+                {
+                    "segment": result.segment.value,
+                    "status": "failed" if result.errors else "ok",
+                    "findings": len(result.key_findings),
+                    "metrics": len(result.important_metrics),
+                    "data_gaps": len(result.data_gaps),
+                    "errors": list(result.errors),
+                }
+                for result in segment_results
+            ])
+            for skip in analytics.errors:
+                tracker.warn(f"Analytic skipped: {skip}")
+            write_json(run_dir / "04_analytics.json", analytics.to_dict())
+            write_json(run_dir / "05_segments.json",
+                       {"segments": [r.to_dict() for r in segment_results]})
+
+        # 6. Synthesis ---------------------------------------------------
+        with tracker.stage("synthesis"):
+            # The LLM synthesizer is the only path now that a model is
+            # configured; it falls back to the inherited deterministic
+            # Key Takeaways selection internally (see
+            # LLMSynthesizer._build_takeaways) whenever the LLM call itself
+            # fails or returns nothing usable, so Synthesizer only runs
+            # directly when no model is configured at all.
+            if settings.model.enabled:
+                draft = await LLMSynthesizer(
+                    report_run_id, plan, reader, analytics, settings.model,
+                    tracker=usage_tracker,
+                ).synthesize_async(segment_results)
+            else:
+                draft = Synthesizer(report_run_id, plan, reader, analytics).synthesize(
+                    segment_results)
+            if freshness.checked:
+                draft = replace(draft, metadata={
+                    **draft.metadata, "freshness_check": freshness.to_dict()})
+
+        # 6.5 Gap research (best-effort, opt-in) --------------------------
+        # Runs before the draft is persisted/QA'd, so a filled gap's evidence
+        # and addendum section are what both the draft JSON and QA validate
+        # against - not something bolted on after the fact.
+        if settings.research_data_gaps and settings.model.enabled:
+            with tracker.stage("gap_research"):
+                try:
+                    # reader.company, not plan.company: the Normalizer's
+                    # canonicalised name is what every other evidence item for
+                    # this ticker already carries (plan.company can be a fuller
+                    # form, e.g. "NVIDIA Corporation" vs "NVIDIA") - tagging new
+                    # evidence with a different spelling of the same company
+                    # is exactly the split identity check_entity_consistency
+                    # exists to catch.
+                    filled = await research_gaps(
+                        report_run_id, reader.company, plan.ticker, plan.request.report_date,
+                        draft.data_gaps, settings.model, tracker=usage_tracker,
+                        max_gaps=settings.research_data_gaps_max,
+                    )
+                    if filled:
+                        store.save(filled)
+                        draft = apply_gap_research(draft, filled)
+                        tracker.warn(
+                            f"Live web research resolved {len(filled)} disclosed data "
+                            "gap(s); see \"Additional Research (Web-Verified)\" in the "
+                            "report.")
+                except Exception as exc:  # noqa: BLE001 - never sink the run over this
+                    log_event(logger, logging.WARNING, "gap research failed",
+                              error=f"{type(exc).__name__}: {exc}")
+                    tracker.warn(
+                        f"Live web research for data gaps failed: "
+                        f"{type(exc).__name__}: {exc}")
+        write_json(run_dir / "06_report_draft.json", draft.to_dict())
+
+        # 7. QA ----------------------------------------------------------
+        with tracker.stage("qa"):
+            qa_result = await QAEngine(
+                model_config=settings.model, tracker=usage_tracker
+            ).validate(draft, plan, reader, analytics)
+            tracker.set_qa(qa_result.to_dict())
+            write_json(run_dir / "07_qa.json", qa_result.to_dict())
+
+        report_json_path = write_report_json(run_dir, draft, qa_result)
+
+        if qa_result.has_critical_errors:
+            log_event(logger, logging.ERROR, "PDF suppressed by QA",
+                      critical=len(qa_result.critical))
+            tracker.set_outputs(json_path=str(report_json_path), pdf_path=None)
+            run, manifest = _finish_with_usage(
+                tracker, usage_tracker, RunStatus.FAILED_QA, run_dir)
+            return ReportResult(
+                report_run_id=report_run_id, status=RunStatus.FAILED_QA, run=run,
+                draft=draft, qa_result=qa_result,
+                report_json_path=report_json_path, run_manifest_path=manifest,
+            )
+
+        # 8. PDF ---------------------------------------------------------
+        with tracker.stage("pdf"):
+            pdf_path = PdfReportRenderer(run_dir).render(draft, qa_result)
+
+        # 8.5 Annotated companion PDF (best-effort) -----------------------
+        # Never gates the primary result: a failure here is logged and
+        # otherwise ignored, since the primary PDF is already final.
+        annotated_pdf_path: Path | None = None
+        with tracker.stage("annotate"):
+            try:
+                annotations = await build_annotations(
+                    draft, settings.model, tracker=usage_tracker)
+                annotated_pdf_path = PdfReportRenderer(run_dir).render_annotated(
+                    draft, annotations, qa_result)
+            except Exception as exc:  # noqa: BLE001 - a review aid, never load-bearing
+                log_event(logger, logging.WARNING, "annotated PDF failed",
+                          error=f"{type(exc).__name__}: {exc}")
+                tracker.warn(
+                    f"The annotated companion PDF could not be generated: "
+                    f"{type(exc).__name__}: {exc}")
+
+        tracker.set_outputs(json_path=str(report_json_path), pdf_path=str(pdf_path))
+        status = (
+            RunStatus.SUCCEEDED_WITH_WARNINGS
+            if (qa_result.warnings or tracker.run.errors or tracker.run.warnings)
+            else RunStatus.SUCCEEDED
+        )
+        run, manifest = _finish_with_usage(tracker, usage_tracker, status, run_dir)
+
+        log_event(logger, logging.INFO, "report run complete",
+                  status=status.value, pdf=str(pdf_path),
+                  annotated_pdf=str(annotated_pdf_path) if annotated_pdf_path else None,
+                  duration_ms=round(run.duration_ms or 0, 1))
+        return ReportResult(
+            report_run_id=report_run_id, status=status, run=run, draft=draft,
+            qa_result=qa_result, pdf_path=pdf_path, annotated_pdf_path=annotated_pdf_path,
+            report_json_path=report_json_path, run_manifest_path=manifest,
+        )
+
+    except Exception as exc:  # noqa: BLE001 - the run record must always be written
+        log_event(logger, logging.ERROR, "report run failed",
+                  error=f"{type(exc).__name__}: {exc}")
+        run, manifest = _finish_with_usage(tracker, usage_tracker, RunStatus.FAILED, run_dir)
+        return ReportResult(
+            report_run_id=report_run_id, status=RunStatus.FAILED, run=run,
+            run_manifest_path=manifest,
+        )
+    finally:
+        if owns_store:
+            store.close()
+
+
+async def _run_analysis(
+    report_run_id: str,
+    plan: ResearchPlan,
+    reader: EvidenceReader,
+    store: EvidenceStore,
+    model_config: ModelConfig | None = None,
+    tracker: UsageTracker | None = None,
+) -> tuple[AnalyticsBundle, tuple[SegmentResult, ...]]:
+    """Analytics then agents.
+
+    The two are drawn as parallel branches in the architecture because neither
+    fetches data; in practice the agents *consume* analytics, so analytics runs
+    first and the agents then run concurrently with each other. Both read only
+    from the Evidence Store.
+    """
+    analytics = await AnalyticsEngine(
+        report_run_id, reader, model_config, tracker=tracker).compute(plan)
+    store.save_analytics(analytics.results)
+    segment_results = await run_segment_agents(plan, reader, analytics, model_config, tracker)
+    return analytics, segment_results
+
+
+def _finish_with_usage(
+    tracker: RunTracker, usage_tracker: UsageTracker, status: RunStatus, run_dir: Path,
+) -> tuple[ReportRun, Path]:
+    """Attach the LLM usage summary to the run record, log it once, and persist the manifest."""
+    usage_summary = usage_tracker.summary()
+    tracker.set_llm_usage(usage_summary)
+    run = tracker.finish(status)
+    manifest = write_run_manifest(run_dir, run)
+    log_event(
+        logger, logging.INFO, "LLM usage summary",
+        calls=usage_summary.get("call_count", 0),
+        total_input_tokens=usage_summary.get("total_input_tokens", 0),
+        total_output_tokens=usage_summary.get("total_output_tokens", 0),
+        total_cost_usd=round(usage_summary.get("total_cost_usd", 0.0), 4),
+        calls_missing_cost=usage_summary.get("calls_missing_cost", 0),
+    )
+    return run, manifest
+
+
+def _warn_on_dead_branches(tracker: RunTracker, acquisition: AcquisitionBundle) -> None:
+    """A failed or empty branch is a documented gap, not a crash."""
+    for branch in acquisition.branches:
+        if branch.status is ProviderStatus.FAILED:
+            tracker.warn(
+                f"The {branch.branch} branch returned no data; the report proceeds "
+                "without it and the affected sections record data gaps.")
+        elif branch.status is ProviderStatus.SKIPPED:
+            tracker.warn(f"The {branch.branch} branch was skipped.")
+        elif branch.item_count == 0:
+            tracker.warn(f"The {branch.branch} branch returned zero items.")
+
+
+def _record_rejections(tracker: RunTracker, normalised: NormalisationResult) -> None:
+    for rejection in normalised.rejections:
+        tracker.error(PipelineError(
+            stage="normalisation",
+            kind="NormalisationError",
+            message=rejection.reason,
+            context={"branch": rejection.branch, "raw_metric": rejection.raw_metric,
+                     "source": rejection.source_name},
+        ))
+    for warning in normalised.warnings:
+        tracker.warn(warning)
+
+
+def generate_report_sync(
+    request: ResearchRequest | dict[str, Any], settings: Settings | None = None
+) -> ReportResult:
+    """Blocking wrapper for scripts and tests."""
+    import asyncio
+
+    parsed = (
+        request if isinstance(request, ResearchRequest)
+        else ResearchRequest.from_dict(request)
+    )
+    return asyncio.run(generate_report(parsed, settings))
