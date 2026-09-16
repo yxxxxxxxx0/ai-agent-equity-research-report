@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
+from datetime import timedelta
 from typing import Any
 from urllib.parse import urlencode
 
@@ -35,12 +37,17 @@ class _MegadataMixin:
         base = str(self.settings.credentials.megadata_base_url).rstrip("/")
         url = f"{base}{endpoint}"
         headers = {"accept": "application/json"}
+        auth: tuple[str, str] | None = None
+        username = self.settings.credentials.megadata_username
+        password = self.settings.credentials.megadata_password
+        if username and password:
+            auth = (username, password)
         api_key = self.settings.credentials.megadata_api_key
-        if api_key:
+        if api_key and auth is None:
             headers["Authorization"] = f"Bearer {api_key}"
         try:
             response = requests.get(
-                url, params=params, headers=headers,
+                url, params=params, headers=headers, auth=auth,
                 timeout=self.settings.provider_timeout_seconds,
             )
             response.raise_for_status()
@@ -49,16 +56,31 @@ class _MegadataMixin:
             raise ProviderError(self.name, f"GET {endpoint} failed: {exc}") from exc
 
     async def _retrieve_many(
-        self, requests_: tuple[DataRequest, ...]
+        self, requests_: tuple[DataRequest, ...], plan: ResearchPlan,
     ) -> list[tuple[DataRequest, Any, str] | BaseException]:
-        results = await asyncio.gather(
-            *(self._get(req.endpoint, req.params) for req in requests_),
-            return_exceptions=True,
-        )
-        return [
-            result if isinstance(result, BaseException) else (req, result[0], result[1])
-            for req, result in zip(requests_, results, strict=True)
-        ]
+        # The LAN-hosted Flask deployment serves several Arctic-backed routes
+        # serially. Bursting a full research plan at it causes otherwise-fast
+        # calls to queue until every request hits its timeout. Keep calls
+        # sequential within each branch; the three acquisition branches still
+        # run concurrently, giving bounded concurrency without overwhelming it.
+        out: list[tuple[DataRequest, Any, str] | BaseException] = []
+        for original in requests_:
+            req = _bounded_request(original, plan)
+            try:
+                payload, url = await self._get(req.endpoint, req.params)
+                if req.endpoint.startswith("/api/bbg/") and not _has_useful_payload(payload):
+                    symbols = req.params.get("symbols", "")
+                    qualified = ",".join(
+                        symbol if " " in symbol.strip() else f"{symbol.strip()} US Equity"
+                        for symbol in symbols.split(",") if symbol.strip()
+                    )
+                    if qualified and qualified != symbols:
+                        retry = replace(req, params={**req.params, "symbols": qualified})
+                        payload, url = await self._get(retry.endpoint, retry.params)
+                out.append((req, payload, url))
+            except BaseException as exc:  # preserve per-request degradation
+                out.append(exc)
+        return out
 
 
 class MegadataMarketProvider(_MegadataMixin, MarketDataProvider):
@@ -73,7 +95,7 @@ class MegadataMarketProvider(_MegadataMixin, MarketDataProvider):
     ) -> ProviderResult:
         observations: list[RawObservation] = []
         errors: list[str] = []
-        for result in await self._retrieve_many(requests_):
+        for result in await self._retrieve_many(requests_, plan):
             if isinstance(result, BaseException):
                 errors.append(str(result))
                 continue
@@ -95,7 +117,7 @@ class MegadataDocumentsProvider(_MegadataMixin, DocumentsProvider):
         data = tuple(r for r in plan.data_requests if r.branch == self.branch)
         searches = plan.search_requests
         data_results, search_results = await asyncio.gather(
-            self._retrieve_many(data), self._search_many(searches))
+            self._retrieve_many(data, plan), self._search_many(searches, plan))
         passages: list[RawDocumentPassage] = []
         errors: list[str] = []
         for result in [*data_results, *search_results]:
@@ -107,16 +129,65 @@ class MegadataDocumentsProvider(_MegadataMixin, DocumentsProvider):
         return self.ok(passages=tuple(passages), errors=tuple(errors))
 
     async def _search_many(
-        self, searches: tuple[SearchRequest, ...]
+        self, searches: tuple[SearchRequest, ...], plan: ResearchPlan,
     ) -> list[tuple[SearchRequest, Any, str] | BaseException]:
-        results = await asyncio.gather(
-            *(self._get(req.endpoint, {"query": req.query}) for req in searches),
-            return_exceptions=True,
-        )
-        return [
-            result if isinstance(result, BaseException) else (req, result[0], result[1])
-            for req, result in zip(searches, results, strict=True)
-        ]
+        out: list[tuple[SearchRequest, Any, str] | BaseException] = []
+        for req in searches:
+            try:
+                if req.endpoint == "/api/news/data":
+                    params = {
+                        "keyword": req.query, "size": "10",
+                        "start_date": (plan.request.report_date - timedelta(days=365)).isoformat(),
+                        "end_date": plan.request.report_date.isoformat(),
+                    }
+                else:
+                    params = {"query": req.query}
+                payload, url = await self._get(req.endpoint, params)
+                out.append((req, payload, url))
+            except BaseException as exc:
+                out.append(exc)
+        return out
+
+
+def _bounded_request(request: DataRequest, plan: ResearchPlan) -> DataRequest:
+    """Apply safe, report-oriented bounds to model-generated API requests."""
+    params = dict(request.params)
+    report_date = plan.request.report_date
+    if request.endpoint == "/api/bbg/ohlcv/data":
+        params.setdefault("trading_days", "120")
+    dated = {
+        "/api/bbg/market-cap/data": 730,
+        "/api/market/bbg/ohlcv": 180,
+        "/api/bbg/indicators/data": 1095,
+        "/api/bbg/estimates/data": 730,
+        "/api/bbg/segment-revenue/data": 1095,
+        "/api/bbg/implied-move/data": 730,
+        "/api/news/filings": 730,
+        "/api/news/filings-by-form": 730,
+        "/api/alpha-vantage/earning-call-transcripts": 730,
+        "/api/alpha-vantage/earning-call-historical": 730,
+    }
+    if request.endpoint in dated:
+        params.setdefault("from_date", (report_date - timedelta(days=dated[request.endpoint])).isoformat())
+        params.setdefault("to_date", report_date.isoformat())
+    if request.endpoint == "/api/bbg/supply-chain/data":
+        params.setdefault("start_date", (report_date - timedelta(days=730)).isoformat())
+        params.setdefault("end_date", report_date.isoformat())
+        try:
+            params["depth"] = str(min(15, max(1, int(params.get("depth", "2")))))
+        except ValueError:
+            params["depth"] = "2"
+    return replace(request, params=params)
+
+
+def _has_useful_payload(payload: Any) -> bool:
+    if payload is None or payload == {} or payload == []:
+        return False
+    if isinstance(payload, dict):
+        values = list(payload.values())
+        if values and all(isinstance(value, dict) and set(value) <= {"error"} for value in values):
+            return False
+    return True
 
 
 def _flatten_observations(
@@ -126,9 +197,21 @@ def _flatten_observations(
         source_id=f"megadata:{request.request_id}", source_name="MegadataAPI",
         source_type=SourceType.MARKET_DATA if request.branch == "market_data"
         else SourceType.COMPANY_FILING,
-        source_url=url,
+        source_url=url, retrieval_provider="MegaAPI", retrieval_url=url,
     )
     out: list[RawObservation] = []
+
+    # Tickers this specific request could plausibly key its payload by -
+    # the primary ticker, its peers/benchmark from the plan, and whatever
+    # symbols the request itself asked for. A leaf under any other key (e.g.
+    # a peer the plan didn't know about) falls back to plan.ticker, so this
+    # must be derived per-request rather than hardcoded: a literal set drawn
+    # from one company's peers silently mislabels every other company's peer
+    # data as the primary ticker's.
+    known_tickers = {plan.ticker, plan.benchmark, *plan.peers}
+    known_tickers.update(
+        s.strip() for s in request.params.get("symbols", "").split(",") if s.strip())
+    known_tickers = frozenset(t.upper() for t in known_tickers if t)
 
     def walk(value: Any, path: tuple[str, ...]) -> None:
         if isinstance(value, dict):
@@ -140,9 +223,13 @@ def _flatten_observations(
         elif value is not None and not isinstance(value, bool):
             metric = ".".join(path[-3:]) or request.request_id
             date = next((part for part in reversed(path) if len(part) >= 10 and part[4:5] == "-"), None)
+            path_ticker = next(
+                (part.upper() for part in path if str(part).upper() in known_tickers),
+                plan.ticker)
             out.append(RawObservation(
                 metric=metric, value=value, source=source, as_of=date,
-                company=plan.company, ticker=plan.ticker, confidence=Confidence.HIGH,
+                company=plan.company if path_ticker == plan.ticker else str(path_ticker),
+                ticker=path_ticker, confidence=Confidence.HIGH,
                 metadata={"request_id": request.request_id, "purpose": request.purpose,
                           "json_path": ".".join(path)},
             ))
@@ -164,20 +251,34 @@ def _extract_passages(
     for index, record in enumerate(records if isinstance(records, list) else []):
         if not isinstance(record, dict):
             continue
-        text = record.get("text") or record.get("content") or record.get("summary")
+        text = (record.get("text") or record.get("content") or record.get("summary")
+                or record.get("story_content"))
         if not text:
             text = json.dumps(record, ensure_ascii=False, default=str)
-        source_url = record.get("url") or url
+        story_id = record.get("story_id")
+        original_url = record.get("url") or (
+            str(story_id).rsplit(":", 1)[0]
+            if story_id and str(story_id).rsplit(":", 1)[-1].isdigit()
+            else story_id
+        )
+        original_name = (record.get("source") or record.get("publisher")
+                         or record.get("source_code"))
+        published = (record.get("published_at") or record.get("published")
+                     or record.get("date") or record.get("created_at"))
         source = SourceRef(
             source_id=f"megadata:{request.request_id}:{index}",
-            source_name=str(record.get("source") or record.get("publisher") or "MegadataAPI"),
+            source_name=str(original_name or "MegaAPI retrieved source"),
             source_type=SourceType.NEWS,
-            source_url=str(source_url),
+            source_url=str(original_url) if original_url else None,
+            retrieval_provider="MegaAPI", retrieval_url=url,
+            original_source_name=str(original_name) if original_name else None,
+            original_source_url=str(original_url) if original_url else None,
+            original_publication_date=str(published) if published else None,
         )
         out.append(RawDocumentPassage(
-            title=str(record.get("title") or request.purpose or request.request_id),
+            title=str(record.get("title") or record.get("headline") or request.purpose or request.request_id),
             source=source,
-            published_at=record.get("published_at") or record.get("published") or record.get("date"),
+            published_at=published,
             text=str(text), company=plan.company, ticker=plan.ticker,
             section=record.get("section"), speaker=record.get("speaker"),
             confidence=Confidence.MEDIUM,

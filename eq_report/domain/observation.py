@@ -22,6 +22,11 @@ class SourceRef:
     source_name: str
     source_type: SourceType
     source_url: str | None = None
+    retrieval_provider: str | None = None
+    retrieval_url: str | None = None
+    original_source_name: str | None = None
+    original_source_url: str | None = None
+    original_publication_date: str | None = None
     is_mock: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -30,6 +35,11 @@ class SourceRef:
             "source_name": self.source_name,
             "source_type": self.source_type.value,
             "source_url": self.source_url,
+            "retrieval_provider": self.retrieval_provider,
+            "retrieval_url": self.retrieval_url,
+            "original_source_name": self.original_source_name,
+            "original_source_url": self.original_source_url,
+            "original_publication_date": self.original_publication_date,
             "is_mock": self.is_mock,
         }
 

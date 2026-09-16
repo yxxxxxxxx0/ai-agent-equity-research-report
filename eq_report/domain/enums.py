@@ -66,6 +66,26 @@ class ClaimType(StrEnum):
     INTERPRETATION = "interpretation"
 
 
+class FactType(StrEnum):
+    """Epistemic class of an evidence observation, before prose is written."""
+
+    REPORTED_FACT = "reported_fact"
+    DERIVED_FACT = "derived_fact"
+    MANAGEMENT_STATEMENT = "management_statement"
+    EXTERNAL_FORECAST = "external_forecast"
+    ANALYST_OPINION = "analyst_opinion"
+    MODEL_INTERPRETATION = "model_interpretation"
+
+
+class EvidenceStatus(StrEnum):
+    """Validation state. Only VALIDATED canonical rows are publishable facts."""
+
+    VALIDATED = "validated"
+    CONFLICTED = "conflicted"
+    UNVERIFIED = "unverified"
+    REJECTED = "rejected"
+
+
 class SegmentName(StrEnum):
     """The segment agents implemented in this prototype."""
 

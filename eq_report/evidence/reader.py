@@ -13,7 +13,7 @@ import datetime as dt
 from dataclasses import dataclass
 from typing import Sequence
 
-from ..domain.enums import EvidenceCategory, SourceType
+from ..domain.enums import EvidenceCategory, EvidenceStatus, SourceType
 from ..domain.evidence import EvidenceItem
 from .store import EvidenceQuery, EvidenceStore
 
@@ -69,6 +69,8 @@ class EvidenceReader:
             metric=metric,
             period_label=period_label,
             has_value=True,
+            status=EvidenceStatus.VALIDATED,
+            canonical_only=True,
         ))
         if exclude_series:
             items = tuple(i for i in items if not i.metadata.get("series"))
@@ -81,6 +83,8 @@ class EvidenceReader:
             ticker=self.ticker,
             metric=metric,
             has_value=True,
+            status=EvidenceStatus.VALIDATED,
+            canonical_only=True,
         ))
         selected = [i for i in items if i.metadata.get("series") == series_name]
         return tuple(sorted(selected, key=lambda i: i.as_of or dt.date.min))
@@ -102,6 +106,8 @@ class EvidenceReader:
             metric="segment_revenue",
             period_label=period_label,
             has_value=True,
+            status=EvidenceStatus.VALIDATED,
+            canonical_only=True,
         ))
         return tuple(sorted(items, key=lambda i: -(i.value or 0)))
 
@@ -125,6 +131,8 @@ class EvidenceReader:
             metric="kpi",
             period_label=period_label,
             has_value=True,
+            status=EvidenceStatus.VALIDATED,
+            canonical_only=True,
         ))
 
     def kpi(self, kpi_name: str, period_label: str | None = None) -> EvidenceItem | None:
@@ -139,6 +147,8 @@ class EvidenceReader:
             ticker=self.ticker,
             category=EvidenceCategory.GUIDANCE,
             has_value=True,
+            status=EvidenceStatus.VALIDATED,
+            canonical_only=True,
         ))
 
     def peer_value(self, peer_ticker: str, metric: str) -> EvidenceItem | None:

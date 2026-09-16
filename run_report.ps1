@@ -27,7 +27,7 @@
     default), so successive runs accumulate under output\runs\<run_id>\.
 
 .PARAMETER SkipRealProviders
-    Unset EQR_ARCTICDB_URI / EQR_MEGADATA_BASE_URL / EQR_MEGADATA_API_KEY
+    Unset EQR_MEGADATA_BASE_URL / EQR_MEGADATA_API_KEY
     before running, so the pipeline falls straight back to its mock
     providers instead of trying (and, if the host is unreachable, hanging
     for several minutes on) a real data provider. Use this when running
@@ -49,6 +49,13 @@
     Turn on the live data-freshness check (EQR_CHECK_DATA_FRESHNESS=true)
     for this run - one extra model call, verifying the dataset is anchored
     on the latest publicly reported period. Off by default.
+
+.PARAMETER VerifyMetricConflicts
+    Turn on live web verification (EQR_VERIFY_METRIC_CONFLICTS=true) of a
+    metric two sources disagree on: the model must find the real value from
+    an actual, dated source before QA will unblock on it - it can never just
+    pick whichever candidate looks more plausible. One extra model call per
+    genuine conflict (capped), off by default.
 
 .PARAMETER PlanningEffort
     Reasoning effort for the planning call only ("high", "medium", or
@@ -78,7 +85,10 @@ param(
     [switch]$EnableGapResearch,
     [int]$MaxGapsResearched,
     [switch]$CheckFreshness,
+    [switch]$VerifyMetricConflicts,
     [switch]$OnlineSources,
+    [switch]$TechnicalAppendix,
+    [switch]$CompactReport,
     [ValidateSet("high", "medium", "low")]
     [string]$PlanningEffort
 )
@@ -107,7 +117,6 @@ if (Test-Path $envFile) {
 }
 
 if ($SkipRealProviders) {
-    Remove-Item Env:\EQR_ARCTICDB_URI -ErrorAction SilentlyContinue
     Remove-Item Env:\EQR_MEGADATA_BASE_URL -ErrorAction SilentlyContinue
     Remove-Item Env:\EQR_MEGADATA_API_KEY -ErrorAction SilentlyContinue
 }
@@ -120,8 +129,17 @@ if ($EnableGapResearch) {
 if ($CheckFreshness) {
     $env:EQR_CHECK_DATA_FRESHNESS = "true"
 }
+if ($VerifyMetricConflicts) {
+    $env:EQR_VERIFY_METRIC_CONFLICTS = "true"
+}
 if ($OnlineSources) {
     $env:EQR_ONLINE_SOURCES = "true"
+}
+if ($TechnicalAppendix) {
+    $env:EQR_TECHNICAL_APPENDIX = "true"
+}
+if ($CompactReport) {
+    $env:EQR_COMPACT_REPORT = "true"
 }
 if ($PlanningEffort) {
     $env:EQR_PLANNING_REASONING_EFFORT = $PlanningEffort
@@ -135,7 +153,10 @@ Write-Host "Model configured  : $modelConfigured$(if (-not $modelConfigured) { '
 Write-Host "Skip real providers: $([bool]$SkipRealProviders)"
 Write-Host "Gap research      : $([bool]$EnableGapResearch)"
 Write-Host "Freshness check   : $([bool]$CheckFreshness)"
+Write-Host "Verify conflicts  : $([bool]$VerifyMetricConflicts)"
 Write-Host "Online sources    : $([bool]$OnlineSources)"
+Write-Host "Technical appendix: True (always generated)"
+Write-Host "Compact report     : True (always generated)"
 Write-Host "Planning effort   : $(if ($PlanningEffort) { $PlanningEffort } else { '(default)' })"
 Write-Host ""
 

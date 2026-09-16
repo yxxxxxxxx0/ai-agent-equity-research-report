@@ -503,6 +503,134 @@ DOCUMENTS["AAPL"] = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# SanDisk fixture
+# ---------------------------------------------------------------------------
+# This fixture is intentionally illustrative, including every financial,
+# market, consensus and document value below.  It permits an end-to-end SNDK
+# report when licensed databases or provider credentials are unavailable.
+MARKET_SNAPSHOT["SNDK"] = {
+    "as_of": "2026-09-15",
+    "quote": {"regularMarketPrice": 86.40, "previousClose": 84.90,
+              "marketCap": "$12,400,000,000", "enterprise_value": 15_100_000_000,
+              "regularMarketVolume": "10,800,000", "average_volume_30d": 9_600_000,
+              "sharesOutstanding": "143,500,000", "fifty_two_week_high": 94.80,
+              "fifty_two_week_low": 38.20},
+    "multiples": {"forwardPE": 17.8, "trailingPE": "24.6", "ev_sales": 2.6},
+    "consensus": {"analyst_rating": "Buy", "mean_price_target": "$96.00",
+                  "revisions_up": 9, "revisions_down": 3},
+    "estimates": [{"metric": "revenue_estimate", "value": "$2.38B", "period": "FY2027 Q1", "period_end": "2026-09-26"},
+                  {"metric": "eps_estimate", "value": 1.18, "period": "FY2027 Q1", "period_end": "2026-09-26"}],
+    "price_history": [("2025-09-15", 44.60), ("2025-10-15", 47.80), ("2025-11-14", 51.20),
+                      ("2025-12-15", 54.90), ("2026-01-15", 50.70), ("2026-02-13", 55.40),
+                      ("2026-03-16", 59.10), ("2026-04-15", 63.80), ("2026-05-15", 68.20),
+                      ("2026-06-15", 72.50), ("2026-07-15", 77.30), ("2026-08-14", 82.10),
+                      ("2026-09-15", 86.40)],
+    "forward_pe_history": [("2025-09-15", 15.2), ("2025-12-15", 16.8), ("2026-03-16", 18.9), ("2026-06-15", 17.1)],
+}
+PEER_MARKET_SNAPSHOT.update({
+    "WDC": {"forwardPE": 14.7, "ev_sales": 2.2, "marketCap": 29_000_000_000, "revenue_growth_yoy_pct": 21.0},
+    "MU": {"forwardPE": 13.9, "ev_sales": 4.1, "marketCap": 185_000_000_000, "revenue_growth_yoy_pct": 38.5},
+    "STX": {"forwardPE": 15.8, "ev_sales": 2.8, "marketCap": 36_000_000_000, "revenue_growth_yoy_pct": 16.2},
+})
+FUNDAMENTALS["SNDK"] = {
+    "FY2026 Q4": {"period_end": "2026-06-26", "lines": {"totalRevenue": "$2,210,000,000", "cost_of_revenue": 1_350_000_000, "gross_profit": 860_000_000, "Gross Margin": "38.9%", "operating_income": 390_000_000, "Operating Margin": "17.6%", "netIncome": 295_000_000, "eps": 1.96, "cash_flow_from_operations": 455_000_000, "capital_expenditure": 160_000_000, "free_cashflow": 295_000_000, "cash_and_cash_equivalents": 1_120_000_000, "total_debt": 3_450_000_000, "research_and_development": 245_000_000}},
+    "FY2026 Q3": {"period_end": "2026-03-27", "lines": {"totalRevenue": 1_980_000_000, "cost_of_revenue": 1_260_000_000, "gross_profit": 720_000_000, "Gross Margin": "36.4%", "operating_income": 295_000_000, "Operating Margin": "14.9%", "netIncome": 225_000_000, "eps": 1.49, "cash_flow_from_operations": 380_000_000, "capital_expenditure": 145_000_000, "free_cashflow": 235_000_000, "cash_and_cash_equivalents": 1_010_000_000, "total_debt": 3_520_000_000, "research_and_development": 230_000_000}},
+    "FY2025 Q4": {"period_end": "2025-06-27", "lines": {"totalRevenue": 1_620_000_000, "cost_of_revenue": 1_130_000_000, "gross_profit": 490_000_000, "Gross Margin": "30.2%", "operating_income": 120_000_000, "Operating Margin": "7.4%", "netIncome": 85_000_000, "eps": 0.58, "cash_flow_from_operations": 255_000_000, "capital_expenditure": 120_000_000, "free_cashflow": 135_000_000, "cash_and_cash_equivalents": 920_000_000, "total_debt": 3_660_000_000, "research_and_development": 205_000_000}},
+}
+SEGMENTS["SNDK"] = {
+    "FY2026 Q4": {"Cloud": 1_030_000_000, "Client": 760_000_000, "Consumer": 420_000_000},
+    "FY2026 Q3": {"Cloud": 900_000_000, "Client": 710_000_000, "Consumer": 370_000_000},
+    "FY2025 Q4": {"Cloud": 670_000_000, "Client": 610_000_000, "Consumer": 340_000_000},
+}
+KPIS["SNDK"] = [
+    {"name": "Cloud revenue", "value": 1_030_000_000, "unit": "USD", "period": "FY2026 Q4", "period_end": "2026-06-26"},
+    {"name": "Cloud revenue", "value": 670_000_000, "unit": "USD", "period": "FY2025 Q4", "period_end": "2025-06-27"},
+    {"name": "Flash bit shipments", "value": 112, "unit": "index", "period": "FY2026 Q4", "period_end": "2026-06-26"},
+]
+CONSENSUS["SNDK"] = [
+    {"metric": "revenue_consensus", "value": 2_110_000_000, "period": "FY2026 Q4", "period_end": "2026-06-26"},
+    {"metric": "eps_consensus", "value": 1.72, "period": "FY2026 Q4", "period_end": "2026-06-26"},
+    {"metric": "revenue_consensus", "value": 2_380_000_000, "period": "FY2027 Q1", "period_end": "2026-09-26"},
+    {"metric": "eps_consensus", "value": 1.18, "period": "FY2027 Q1", "period_end": "2026-09-26"},
+]
+GUIDANCE["SNDK"] = [
+    {"metric": "revenue_guidance", "value": "$2.42B", "period": "FY2027 Q1", "period_end": "2026-09-26", "note": "Illustrative midpoint."},
+    {"metric": "gross_margin_guidance", "value": "39.5%", "period": "FY2027 Q1", "period_end": "2026-09-26", "note": "Illustrative midpoint."},
+]
+DOCUMENTS["SNDK"] = [
+    {"title": "SanDisk Illustrative FY2026 Q4 Results", "source_type": "earnings_release", "publisher": "SanDisk Investor Relations (illustrative)", "published": "2026-08-05", "url": "https://example.invalid/sndk/q4-results", "passages": [{"section": "Highlights", "text": "Illustrative FY2026 Q4 revenue was $2.21 billion, supported by Cloud and Client flash demand."}, {"section": "Outlook", "speaker": "Company outlook", "text": "Illustrative FY2027 Q1 revenue is expected to be $2.42 billion at a gross-margin midpoint of 39.5%."}]},
+    {"title": "SanDisk Illustrative FY2026 Form 10-K", "source_type": "company_filing", "publisher": "SEC EDGAR (illustrative)", "published": "2026-08-15", "url": "https://example.invalid/sndk/fy2026-10k", "passages": [{"section": "MD&A", "text": "The illustrative scenario assumes improving flash pricing, mix and factory utilisation, while customer inventory remains cyclical."}, {"section": "Risk Factors", "text": "The illustrative scenario assumes NAND pricing, supply additions, demand cyclicality, leverage and customer concentration remain material risks."}]},
+    {"title": "SanDisk Illustrative Earnings Call", "source_type": "earnings_call", "publisher": "Company earnings call (illustrative)", "published": "2026-08-05", "url": "https://example.invalid/sndk/q4-call", "passages": [{"section": "Prepared remarks", "speaker": "Chief Executive Officer", "text": "The illustrative scenario assumes cloud demand and portfolio optimisation support the next product cycle."}]},
+    {"title": "Flash Market Illustrative Update", "source_type": "industry_research", "publisher": "Illustrative Industry Research", "published": "2026-09-01", "url": "https://example.invalid/sndk/flash-market", "passages": [{"section": "Market", "text": "The illustrative market view assumes enterprise flash demand is improving while supply discipline remains a key determinant of pricing."}]},
+    {"title": "Counterpoint Research view following Sandisk Investor Day", "source_type": "industry_research", "publisher": "Counterpoint Research (captured as an illustrative KOL fixture)", "published": "2026-08-18", "url": "https://counterpointresearch.com/en/insights/sandisk-investor-day-caching-out-the-nand-cycle-with-contracts", "passages": [{"section": "KOL perspective", "speaker": "Counterpoint Research", "text": "Counterpoint Research's post-Investor-Day interpretation was that Sandisk still has to manage a tight demand-supply balance while competition, including investment by YMTC, increases. This is an external interpretation, not a reported company fact."}]},
+    {"title": "JPMorgan analyst reaction to Sandisk Investor Day", "source_type": "news", "publisher": "Benzinga summary of JPMorgan research (captured as an illustrative KOL fixture)", "published": "2026-08-14", "url": "https://www.benzinga.com/analyst-stock-ratings/upgrades/26/08/61215473/sandisk-may-have-broken-memorys-boom-bust-cycle", "passages": [{"section": "KOL perspective", "speaker": "Harlan Sur, JPMorgan analyst", "text": "JPMorgan analyst Harlan Sur's published view highlighted AI-related storage demand, long-term customer agreements and higher margins as potential multiyear earnings drivers. This is an analyst interpretation, not a reported company fact."}]},
+]
+
+
+# ---------------------------------------------------------------------------
+# Tesla fixture
+# ---------------------------------------------------------------------------
+# All values in this fixture are synthetic.  They model the shape of an EV
+# manufacturer so the LLM workflow and QA checks can run without claiming any
+# real Tesla financial, operational or market information.
+MARKET_SNAPSHOT["TSLA"] = {
+    "as_of": "2026-09-15",
+    "quote": {"regularMarketPrice": 362.80, "previousClose": 358.60,
+              "marketCap": "$1,170,000,000,000", "enterprise_value": 1_105_000_000_000,
+              "regularMarketVolume": "98,400,000", "average_volume_30d": 91_200_000,
+              "sharesOutstanding": "3,230,000,000", "fifty_two_week_high": 421.50,
+              "fifty_two_week_low": 218.40},
+    "multiples": {"forwardPE": 64.5, "trailingPE": "81.2", "ev_sales": 10.1},
+    "consensus": {"analyst_rating": "Hold", "mean_price_target": "$345.00",
+                  "revisions_up": 12, "revisions_down": 14},
+    "estimates": [{"metric": "revenue_estimate", "value": "$26.80B", "period": "FY2026 Q3", "period_end": "2026-09-30"},
+                  {"metric": "eps_estimate", "value": 0.62, "period": "FY2026 Q3", "period_end": "2026-09-30"}],
+    "price_history": [("2025-09-15", 282.40), ("2025-10-15", 298.60), ("2025-11-14", 314.20),
+                      ("2025-12-15", 327.10), ("2026-01-15", 301.80), ("2026-02-13", 285.70),
+                      ("2026-03-16", 296.90), ("2026-04-15", 319.40), ("2026-05-15", 342.80),
+                      ("2026-06-15", 331.60), ("2026-07-15", 348.90), ("2026-08-14", 356.20),
+                      ("2026-09-15", 362.80)],
+    "forward_pe_history": [("2025-09-15", 58.2), ("2025-12-15", 61.8), ("2026-03-16", 67.1), ("2026-06-15", 62.4)],
+}
+PEER_MARKET_SNAPSHOT.update({
+    "GM": {"forwardPE": 6.7, "ev_sales": 0.8, "marketCap": 59_000_000_000, "revenue_growth_yoy_pct": 4.2},
+    "F": {"forwardPE": 7.9, "ev_sales": 0.7, "marketCap": 52_000_000_000, "revenue_growth_yoy_pct": 2.8},
+    "BYDDY": {"forwardPE": 20.6, "ev_sales": 1.4, "marketCap": 142_000_000_000, "revenue_growth_yoy_pct": 19.5},
+})
+FUNDAMENTALS["TSLA"] = {
+    "FY2026 Q2": {"period_end": "2026-06-30", "lines": {"totalRevenue": "$25,600,000,000", "cost_of_revenue": 19_350_000_000, "gross_profit": 6_250_000_000, "Gross Margin": "24.4%", "operating_income": 2_350_000_000, "Operating Margin": "9.2%", "netIncome": 1_780_000_000, "eps": 0.55, "cash_flow_from_operations": 3_950_000_000, "capital_expenditure": 2_250_000_000, "free_cashflow": 1_700_000_000, "cash_and_cash_equivalents": 34_600_000_000, "total_debt": 8_200_000_000, "research_and_development": 1_550_000_000}},
+    "FY2026 Q1": {"period_end": "2026-03-31", "lines": {"totalRevenue": 23_900_000_000, "cost_of_revenue": 18_200_000_000, "gross_profit": 5_700_000_000, "Gross Margin": "23.8%", "operating_income": 1_950_000_000, "Operating Margin": "8.2%", "netIncome": 1_420_000_000, "eps": 0.44, "cash_flow_from_operations": 3_220_000_000, "capital_expenditure": 2_120_000_000, "free_cashflow": 1_100_000_000, "cash_and_cash_equivalents": 32_800_000_000, "total_debt": 8_500_000_000, "research_and_development": 1_480_000_000}},
+    "FY2025 Q2": {"period_end": "2025-06-30", "lines": {"totalRevenue": 24_100_000_000, "cost_of_revenue": 18_700_000_000, "gross_profit": 5_400_000_000, "Gross Margin": "22.4%", "operating_income": 1_620_000_000, "Operating Margin": "6.7%", "netIncome": 1_160_000_000, "eps": 0.36, "cash_flow_from_operations": 2_980_000_000, "capital_expenditure": 1_950_000_000, "free_cashflow": 1_030_000_000, "cash_and_cash_equivalents": 30_400_000_000, "total_debt": 9_100_000_000, "research_and_development": 1_340_000_000}},
+}
+SEGMENTS["TSLA"] = {
+    "FY2026 Q2": {"Automotive": 20_400_000_000, "Energy Generation and Storage": 3_100_000_000, "Services and Other": 2_100_000_000},
+    "FY2026 Q1": {"Automotive": 19_100_000_000, "Energy Generation and Storage": 2_850_000_000, "Services and Other": 1_950_000_000},
+    "FY2025 Q2": {"Automotive": 20_300_000_000, "Energy Generation and Storage": 2_200_000_000, "Services and Other": 1_600_000_000},
+}
+KPIS["TSLA"] = [
+    {"name": "Vehicle deliveries", "value": 495_000, "unit": "vehicles", "period": "FY2026 Q2", "period_end": "2026-06-30"},
+    {"name": "Vehicle deliveries", "value": 462_000, "unit": "vehicles", "period": "FY2025 Q2", "period_end": "2025-06-30"},
+    {"name": "Energy storage deployments", "value": 12.8, "unit": "GWh", "period": "FY2026 Q2", "period_end": "2026-06-30"},
+]
+CONSENSUS["TSLA"] = [
+    {"metric": "revenue_consensus", "value": 25_000_000_000, "period": "FY2026 Q2", "period_end": "2026-06-30"},
+    {"metric": "eps_consensus", "value": 0.49, "period": "FY2026 Q2", "period_end": "2026-06-30"},
+    {"metric": "revenue_consensus", "value": 26_800_000_000, "period": "FY2026 Q3", "period_end": "2026-09-30"},
+    {"metric": "eps_consensus", "value": 0.62, "period": "FY2026 Q3", "period_end": "2026-09-30"},
+]
+GUIDANCE["TSLA"] = [
+    {"metric": "revenue_guidance", "value": "$27.10B", "period": "FY2026 Q3", "period_end": "2026-09-30", "note": "Illustrative midpoint."},
+    {"metric": "gross_margin_guidance", "value": "24.8%", "period": "FY2026 Q3", "period_end": "2026-09-30", "note": "Illustrative midpoint."},
+]
+DOCUMENTS["TSLA"] = [
+    {"title": "Tesla Illustrative FY2026 Q2 Results", "source_type": "earnings_release", "publisher": "Tesla Investor Relations (illustrative)", "published": "2026-07-22", "url": "https://example.invalid/tsla/q2-results", "passages": [{"section": "Highlights", "text": "Illustrative FY2026 Q2 revenue was $25.6 billion, with Automotive, Energy Storage and Services contributing to the revenue mix."}, {"section": "Outlook", "speaker": "Company outlook", "text": "Illustrative FY2026 Q3 revenue is expected to be $27.1 billion and gross margin approximately 24.8%."}]},
+    {"title": "Tesla Illustrative FY2026 Q2 Filing", "source_type": "company_filing", "publisher": "SEC EDGAR (illustrative)", "published": "2026-08-01", "url": "https://example.invalid/tsla/q2-filing", "passages": [{"section": "MD&A", "text": "The illustrative scenario assumes vehicle pricing, production efficiency, battery-material costs and product mix remain material drivers of automotive margin."}, {"section": "Risk Factors", "text": "The illustrative scenario assumes competition, regulatory requirements, supply-chain execution, demand elasticity and capital allocation remain material risks."}]},
+    {"title": "Tesla Illustrative Earnings Call", "source_type": "earnings_call", "publisher": "Company earnings call (illustrative)", "published": "2026-07-22", "url": "https://example.invalid/tsla/q2-call", "passages": [{"section": "Prepared remarks", "speaker": "Chief Executive Officer", "text": "The illustrative scenario assumes energy storage growth and manufacturing efficiency remain strategic operating priorities."}]},
+    {"title": "EV Market Illustrative Update", "source_type": "industry_research", "publisher": "Illustrative Industry Research", "published": "2026-09-01", "url": "https://example.invalid/tsla/ev-market", "passages": [{"section": "Market", "text": "The illustrative market view assumes global EV demand growth remains competitive, with pricing and regional mix affecting industry profitability."}]},
+]
+
+
 def has_sample_data(ticker: str | None) -> bool:
     """Whether the sample dataset covers this ticker."""
     return bool(ticker) and ticker in FUNDAMENTALS

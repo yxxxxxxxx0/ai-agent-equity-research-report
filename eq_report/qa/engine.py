@@ -26,6 +26,7 @@ since only the deterministic checks are allowed to block the PDF.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import Any
 
 from ..config import ModelConfig
@@ -35,6 +36,7 @@ from ..domain.plan import ResearchPlan
 from ..domain.qa import QAFinding, QAResult
 from ..domain.report import ReportDraft
 from ..evidence.reader import EvidenceReader
+from ..llm.client import OpenRouterJSONClient
 from ..llm.usage import UsageTracker
 from ..llm.verify import safe_complete_json
 from ..logging_setup import get_logger, log_event
@@ -51,17 +53,31 @@ supports the entity, period, direction, magnitude, causality and conclusion—no
 a citation exists. Also judge inconsistent numbers, missing sections and editorial problems.
 Return JSON only, matching the requested schema."""
 
+_CONFLICT_VERIFY_SYSTEM_PROMPT = """You are a conservative financial-data verifier with live web
+search, helping resolve a genuine disagreement between two data-vendor readings of the same
+metric. Search the web for a real, current, dated source that states this metric's actual value.
+Reply only with what you can attribute to an actual page you found: never invent a value, a
+publisher name, a URL, or a date. If you cannot find a specific, dated source, set found=false
+rather than guessing which candidate is more plausible. Return JSON only, matching the requested
+schema."""
+
+#: Bounds the cost of one run: at most this many extra, web-search-enabled
+#: model calls to verify a genuine (not just differently-defined) metric
+#: conflict, mirroring pipeline.gap_research's MAX_GAPS_RESEARCHED bound.
+_MAX_CONFLICT_VERIFICATIONS = 5
+
 
 class QAEngine:
     """Validates a ReportDraft before it is allowed to become a PDF."""
 
     def __init__(
         self, checks=ALL_CHECKS, model_config: ModelConfig | None = None,
-        *, tracker: UsageTracker | None = None,
+        *, tracker: UsageTracker | None = None, verify_conflicts: bool = False,
     ) -> None:
         self.checks = tuple(checks)
         self._model_config = model_config
         self._tracker = tracker
+        self._verify_conflicts = verify_conflicts
 
     async def validate(
         self,
@@ -89,6 +105,14 @@ class QAEngine:
                           check=name, error=str(exc))
             checks_run.append(name)
 
+        # A conflict is usually deterministic, but market-data payloads can
+        # place adjusted, peer, option, and benchmark series under similar
+        # field labels. Give the LLM the *small* disputed group only to decide
+        # whether definitions differ. It may de-escalate a false comparison;
+        # it may never promote a value or choose a numerical winner.
+        findings = await self._adjudicate_metric_conflicts(findings, reader)
+        checks_run.append("llm_conflict_adjudication")
+
         # The deterministic critical/warning count is fixed before the LLM is
         # ever consulted, so nothing below can change what gates the PDF.
         deterministic_critical = sum(1 for f in findings if f.severity is Severity.CRITICAL)
@@ -115,6 +139,146 @@ class QAEngine:
                       f"QA warning [{finding.check}] {finding.message}",
                       check=finding.check, subject=finding.subject)
         return result
+
+    async def _adjudicate_metric_conflicts(
+        self, findings: list[QAFinding], reader: EvidenceReader,
+    ) -> list[QAFinding]:
+        conflicts = [f for f in findings if f.check == "consistency.metric_agreement"
+                     and f.severity is Severity.CRITICAL]
+        if not conflicts:
+            return findings
+        groups: list[dict[str, Any]] = []
+        for index, finding in enumerate(conflicts[:10]):
+            rows: list[dict[str, Any]] = []
+            for evidence_id in finding.details.get("evidence_ids", []):
+                item = reader.get(str(evidence_id))
+                if item is None:
+                    continue
+                rows.append({
+                    "evidence_id": item.evidence_id, "metric": item.metric,
+                    "value": item.value, "unit": item.unit, "currency": item.currency,
+                    "as_of": item.as_of.isoformat() if item.as_of else None,
+                    "period": item.period_label, "basis": item.basis,
+                    "source": item.original_source_name or item.source_name,
+                    "raw_metric": item.raw_metric,
+                    "json_path": item.metadata.get("json_path"),
+                    "series": item.metadata.get("series"),
+                })
+            groups.append({"index": index, "metric": finding.subject, "rows": rows})
+        prompt = (
+            "Determine whether each candidate group represents the SAME comparable financial/"
+            "market fact, DIFFERENT DEFINITIONS OR INSTRUMENTS, or is INSUFFICIENTLY IDENTIFIED. "
+            "Do not select a numerical winner and do not infer missing metadata.\n"
+            f"Groups: {groups}\nReturn JSON: {{'items':[{{'index':0,'verdict':'same_fact|different_definitions|insufficient','reason':'short'}}]}}"
+        )
+        response, _error = await safe_complete_json(
+            self._model_config,
+            "You are a conservative financial-data provenance reviewer. Return JSON only.",
+            prompt, tracker=self._tracker, stage="qa_conflict_adjudication")
+        if response is None:
+            return findings
+        downgraded: dict[int, str] = {}
+        same_fact_positions: list[int] = []
+        for row in response.payload.get("items", []) if isinstance(response.payload, dict) else []:
+            if not isinstance(row, dict):
+                continue
+            verdict = str(row.get("verdict"))
+            try:
+                position = int(row.get("index"))
+            except (TypeError, ValueError):
+                continue
+            if not (0 <= position < len(conflicts)):
+                continue
+            if verdict == "different_definitions":
+                downgraded[id(conflicts[position])] = (
+                    f"LLM provenance review: {row.get('reason') or 'definitions differ'}.")
+            elif verdict == "same_fact":
+                same_fact_positions.append(position)
+
+        # A genuine same-fact disagreement (not just different definitions) is
+        # never resolved by guessing which value looks more plausible - only
+        # by finding a real, dated, source-linked answer, the same standard
+        # pipeline.gap_research holds live web search to. Opt-in: a real extra
+        # cost per conflict (see Settings.verify_metric_conflicts).
+        if self._verify_conflicts and same_fact_positions and self._model_config is not None \
+                and self._model_config.enabled:
+            downgraded.update(await self._verify_conflicts_online(
+                conflicts, groups, same_fact_positions, reader))
+
+        return [
+            replace(finding, severity=Severity.WARNING,
+                    message=f"{finding.message} {downgraded[id(finding)]}")
+            if id(finding) in downgraded else finding
+            for finding in findings
+        ]
+
+    async def _verify_conflicts_online(
+        self, conflicts: list[QAFinding], groups: list[dict[str, Any]],
+        same_fact_positions: list[int], reader: EvidenceReader,
+    ) -> dict[int, str]:
+        """Best-effort live verification of a genuine same-fact disagreement.
+
+        Only unblocks a conflict by matching one candidate to an actual,
+        dated source the model found via web search - never by picking
+        whichever value seems more plausible. No match, no URL, or a source
+        that agrees with neither candidate all leave the conflict CRITICAL,
+        exactly as if verification had not run.
+        """
+        client = OpenRouterJSONClient(self._model_config, tracker=self._tracker)
+        schema = {
+            "found": "true or false",
+            "matched_value": "the number the source states, only if found is true",
+            "source_name": "the publisher or site name, only if found is true",
+            "source_url": "the exact URL of the page you found this on, only if found is true",
+            "published_date": "YYYY-MM-DD if stated on the page, else null",
+        }
+        downgraded: dict[int, str] = {}
+        for position in same_fact_positions[:_MAX_CONFLICT_VERIFICATIONS]:
+            finding = conflicts[position]
+            group = groups[position]
+            candidates = sorted({
+                row["value"] for row in group["rows"] if row.get("value") is not None})
+            if not candidates:
+                continue
+            prompt = (
+                f"Company: {reader.company} ({reader.ticker or 'ticker unknown'})\n"
+                f"Metric: {group['metric']}\n"
+                f"Data-vendor sources disagree; the disputed candidate values are: {candidates}\n"
+                "Find the real, current value of this metric from an actual, dated source, and "
+                "report exactly what that source states.\n"
+                f"Return this JSON shape: {schema}"
+            )
+            try:
+                response = await client.complete_json(
+                    _CONFLICT_VERIFY_SYSTEM_PROMPT, prompt, web_search=True,
+                    stage="qa_conflict_verification")
+            except Exception as exc:  # noqa: BLE001 - one failed lookup must not sink the rest
+                log_event(logger, logging.WARNING, "conflict verification call failed",
+                          metric=group["metric"], error=f"{type(exc).__name__}: {exc}")
+                continue
+            payload = response.payload if isinstance(response.payload, dict) else {}
+            if not payload.get("found"):
+                continue
+            url = str(payload.get("source_url", "")).strip()
+            source_name = str(payload.get("source_name", "")).strip()
+            # A citation with no real URL is indistinguishable from an invented
+            # one - the same rule pipeline.gap_research applies.
+            if not source_name or not (url.startswith("http://") or url.startswith("https://")):
+                continue
+            try:
+                matched_value = float(payload.get("matched_value"))
+            except (TypeError, ValueError):
+                continue
+            winner = min(candidates, key=lambda v: abs(v - matched_value))
+            if abs(winner - matched_value) / max(abs(matched_value), 1e-9) > 0.02:
+                continue  # the verified source doesn't actually match either candidate
+            date_bit = f", dated {payload['published_date']}" if payload.get("published_date") else ""
+            downgraded[id(finding)] = (
+                f"Web verification: {source_name}{date_bit} reports {matched_value}, "
+                f"matching the {winner} candidate; the other candidate(s) were not "
+                f"corroborated by any dated source. <{url}>"
+            )
+        return downgraded
 
     # -- LLM-backed overlay ------------------------------------------------
     async def _llm_review(

@@ -6,3 +6,10 @@ venv/
 .pytest_cache/
 .ruff_cache/
 output/
+output_*/
+
+# Third-party sell-side PDFs used as a local design reference - copyrighted,
+# not ours to redistribute from a public repo.
+samples/
+
+.claude/scheduled_tasks.lock

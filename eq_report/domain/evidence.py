@@ -13,7 +13,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from .enums import Confidence, EvidenceCategory, SourceType
+from .enums import Confidence, EvidenceCategory, EvidenceStatus, FactType, SourceType
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +73,20 @@ class EvidenceItem:
     period: FiscalPeriod | None = None
     as_of: dt.date | None = None
     source_url: str | None = None
+    retrieval_provider: str | None = None
+    retrieval_url: str | None = None
+    original_source_name: str | None = None
+    original_source_url: str | None = None
+    original_publication_date: dt.date | None = None
+    basis: str | None = None
+    frequency: str | None = None
+    period_start: dt.date | None = None
+    fact_type: FactType = FactType.REPORTED_FACT
+    status: EvidenceStatus = EvidenceStatus.UNVERIFIED
+    is_canonical: bool = False
+    reconciliation_key: str | None = None
+    alternate_evidence_ids: tuple[str, ...] = ()
+    validation_messages: tuple[str, ...] = ()
     claim_text: str | None = None        # document evidence
     document_title: str | None = None
     published_at: dt.date | None = None
@@ -88,7 +102,7 @@ class EvidenceItem:
 
     def citation(self) -> str:
         """Short human-readable citation used in the report's source list."""
-        bits = [self.source_name]
+        bits = [self.original_source_name or self.source_name]
         if self.document_title and self.document_title != self.source_name:
             bits.append(self.document_title)
         date = self.published_at or self.as_of
@@ -113,6 +127,20 @@ class EvidenceItem:
             "source_name": self.source_name,
             "source_type": self.source_type.value,
             "source_url": self.source_url,
+            "retrieval_provider": self.retrieval_provider,
+            "retrieval_url": self.retrieval_url,
+            "original_source_name": self.original_source_name,
+            "original_source_url": self.original_source_url,
+            "original_publication_date": self.original_publication_date.isoformat() if self.original_publication_date else None,
+            "basis": self.basis,
+            "frequency": self.frequency,
+            "period_start": self.period_start.isoformat() if self.period_start else None,
+            "fact_type": self.fact_type.value,
+            "status": self.status.value,
+            "is_canonical": self.is_canonical,
+            "reconciliation_key": self.reconciliation_key,
+            "alternate_evidence_ids": list(self.alternate_evidence_ids),
+            "validation_messages": list(self.validation_messages),
             "claim_text": self.claim_text,
             "document_title": self.document_title,
             "published_at": self.published_at.isoformat() if self.published_at else None,

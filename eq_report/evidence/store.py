@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from ..domain.analytics import AnalyticsResult
-from ..domain.enums import Confidence, EvidenceCategory, SourceType
+from ..domain.enums import Confidence, EvidenceCategory, EvidenceStatus, FactType, SourceType
 from ..domain.evidence import EvidenceItem, FiscalPeriod
 from ..errors import EvidenceStoreError
 from ..logging_setup import get_logger, log_event
@@ -47,6 +47,20 @@ CREATE TABLE IF NOT EXISTS evidence (
     source_name     TEXT NOT NULL,
     source_type     TEXT NOT NULL,
     source_url      TEXT,
+    retrieval_provider TEXT,
+    retrieval_url   TEXT,
+    original_source_name TEXT,
+    original_source_url TEXT,
+    original_publication_date TEXT,
+    basis           TEXT,
+    frequency       TEXT,
+    period_start    TEXT,
+    fact_type       TEXT NOT NULL DEFAULT 'reported_fact',
+    status          TEXT NOT NULL DEFAULT 'unverified',
+    is_canonical    INTEGER NOT NULL DEFAULT 0,
+    reconciliation_key TEXT,
+    alternate_evidence_ids TEXT NOT NULL DEFAULT '[]',
+    validation_messages TEXT NOT NULL DEFAULT '[]',
     claim_text      TEXT,
     document_title  TEXT,
     published_at    TEXT,
@@ -110,6 +124,8 @@ class EvidenceQuery:
     as_of_from: str | None = None
     as_of_to: str | None = None
     has_value: bool | None = None
+    status: EvidenceStatus | None = None
+    canonical_only: bool | None = None
     limit: int | None = None
     order_by: str = "as_of DESC, period_end DESC, evidence_id ASC"
 
@@ -156,6 +172,10 @@ class EvidenceQuery:
             clauses.append("value IS NOT NULL")
         elif self.has_value is False:
             clauses.append("value IS NULL")
+        if self.status:
+            add("status = ?", self.status.value)
+        if self.canonical_only is True:
+            clauses.append("is_canonical = 1")
 
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         sql = f"SELECT * FROM evidence{where} ORDER BY {self.order_by}"
@@ -177,7 +197,27 @@ class EvidenceStore:
             raise EvidenceStoreError(f"could not open {self.database_path}: {exc}") from exc
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._migrate_schema()
         self._conn.commit()
+
+    def _migrate_schema(self) -> None:
+        """Add canonical-layer columns to databases created by older releases."""
+        existing = {row[1] for row in self._conn.execute("PRAGMA table_info(evidence)")}
+        additions = {
+            "retrieval_provider": "TEXT", "retrieval_url": "TEXT",
+            "original_source_name": "TEXT", "original_source_url": "TEXT",
+            "original_publication_date": "TEXT", "basis": "TEXT",
+            "frequency": "TEXT", "period_start": "TEXT",
+            "fact_type": "TEXT NOT NULL DEFAULT 'reported_fact'",
+            "status": "TEXT NOT NULL DEFAULT 'unverified'",
+            "is_canonical": "INTEGER NOT NULL DEFAULT 0",
+            "reconciliation_key": "TEXT",
+            "alternate_evidence_ids": "TEXT NOT NULL DEFAULT '[]'",
+            "validation_messages": "TEXT NOT NULL DEFAULT '[]'",
+        }
+        for name, definition in additions.items():
+            if name not in existing:
+                self._conn.execute(f"ALTER TABLE evidence ADD COLUMN {name} {definition}")
 
     # -- lifecycle -------------------------------------------------------
     def close(self) -> None:
@@ -378,6 +418,20 @@ class EvidenceStore:
             "source_name": item.source_name,
             "source_type": item.source_type.value,
             "source_url": item.source_url,
+            "retrieval_provider": item.retrieval_provider,
+            "retrieval_url": item.retrieval_url,
+            "original_source_name": item.original_source_name,
+            "original_source_url": item.original_source_url,
+            "original_publication_date": item.original_publication_date.isoformat() if item.original_publication_date else None,
+            "basis": item.basis,
+            "frequency": item.frequency,
+            "period_start": item.period_start.isoformat() if item.period_start else None,
+            "fact_type": item.fact_type.value,
+            "status": item.status.value,
+            "is_canonical": int(item.is_canonical),
+            "reconciliation_key": item.reconciliation_key,
+            "alternate_evidence_ids": json.dumps(list(item.alternate_evidence_ids)),
+            "validation_messages": json.dumps(list(item.validation_messages)),
             "claim_text": item.claim_text,
             "document_title": item.document_title,
             "published_at": item.published_at.isoformat() if item.published_at else None,
@@ -420,6 +474,20 @@ class EvidenceStore:
             source_name=row["source_name"],
             source_type=SourceType(row["source_type"]),
             source_url=row["source_url"],
+            retrieval_provider=row["retrieval_provider"],
+            retrieval_url=row["retrieval_url"],
+            original_source_name=row["original_source_name"],
+            original_source_url=row["original_source_url"],
+            original_publication_date=(dt.date.fromisoformat(row["original_publication_date"]) if row["original_publication_date"] else None),
+            basis=row["basis"],
+            frequency=row["frequency"],
+            period_start=dt.date.fromisoformat(row["period_start"]) if row["period_start"] else None,
+            fact_type=FactType(row["fact_type"]),
+            status=EvidenceStatus(row["status"]),
+            is_canonical=bool(row["is_canonical"]),
+            reconciliation_key=row["reconciliation_key"],
+            alternate_evidence_ids=tuple(json.loads(row["alternate_evidence_ids"] or "[]")),
+            validation_messages=tuple(json.loads(row["validation_messages"] or "[]")),
             claim_text=row["claim_text"],
             document_title=row["document_title"],
             published_at=(

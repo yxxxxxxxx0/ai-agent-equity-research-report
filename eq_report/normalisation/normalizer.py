@@ -65,17 +65,25 @@ from .units import (
     normalise_percent,
     parse_number,
 )
+from .reconciliation import reconcile
 
 logger = get_logger("normalisation")
 
-_LLM_SYSTEM_PROMPT = """You are the normalisation layer of a neutral institutional equity
-research pipeline. You are given a numbered batch of raw provider data points. For each one,
-propose: the canonical metric id it represents (choose only from the supplied list, or the
-literal string "unmapped" if none fits), the clean numeric value implied by the raw value
-(e.g. "$62.3B" -> 62300000000, "74.8%" -> 74.8), and, if the raw metric is a percentage,
-whether it is already in percent units (as opposed to a 0-1 fraction). Never invent a number
-that is not implied by the raw value you were given. Return JSON only, matching the requested
-schema."""
+_LLM_SYSTEM_PROMPT = """You classify raw provider metric names for a neutral institutional
+equity-research pipeline. For each numbered metric shape, propose exactly one canonical metric
+id from the supplied vocabulary, or the literal string "unmapped". Do not infer values, units,
+periods, or accounting bases: deterministic code handles them. Return JSON only."""
+
+# The API frequently returns tens of thousands of time-series leaves. Sending
+# every leaf in one prompt caused OpenRouter HTTP 400 request/context failures.
+# Metric *shapes* repeat across those leaves, so classify them in small sections.
+_LLM_METRIC_SHAPES_PER_BATCH = 150
+_LLM_MAX_SHAPES_PER_SECTION = 300
+_LLM_METRIC_TERMS = (
+    "revenue", "sales", "eps", "earning", "margin", "income", "cash", "debt",
+    "capex", "capital", "price", "market", "enterprise", "share", "volume",
+    "target", "estimate", "guidance", "multiple", "pe", "ev_",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,7 +212,7 @@ class Normalizer:
                     source_name=passage.source.source_name,
                 ))
 
-        deduped = self._dedupe(evidence)
+        deduped = list(reconcile(self._dedupe(evidence)))
         warnings: list[str] = list(extra_warnings)
         if unmapped:
             warnings.append(
@@ -282,6 +290,11 @@ class Normalizer:
                     source_name=observation.source.source_name,
                     source_type=observation.source.source_type,
                     source_url=observation.source.source_url,
+                    retrieval_provider=observation.source.retrieval_provider,
+                    retrieval_url=observation.source.retrieval_url,
+                    original_source_name=observation.source.original_source_name,
+                    original_source_url=observation.source.original_source_url,
+                    original_publication_date=normalise_date(observation.source.original_publication_date, field_name="original_publication_date"),
                     claim_text=text,
                     retrieved_at=observation.retrieved_at,
                     confidence=self._confidence(observation.confidence),
@@ -350,6 +363,12 @@ class Normalizer:
             source_name=observation.source.source_name,
             source_type=observation.source.source_type,
             source_url=observation.source.source_url,
+            retrieval_provider=observation.source.retrieval_provider,
+            retrieval_url=observation.source.retrieval_url,
+            original_source_name=observation.source.original_source_name,
+            original_source_url=observation.source.original_source_url,
+            original_publication_date=normalise_date(observation.source.original_publication_date, field_name="original_publication_date"),
+            frequency=("annual" if period and period.is_annual else "quarterly" if period else observation.metadata.get("frequency")),
             retrieved_at=observation.retrieved_at,
             confidence=self._confidence(observation.confidence),
             raw_metric=observation.metric,
@@ -364,7 +383,7 @@ class Normalizer:
         self,
         branches: tuple[tuple[str, tuple[RawObservation, ...], EvidenceCategory], ...],
     ) -> tuple[dict[tuple[str, int], dict[str, Any]], str | None]:
-        """One batched LLM call proposing an interpretation for every observation.
+        """Classify unresolved metric shapes in small, provider-separated batches.
 
         Returns ``({(branch, index): {...}}, note)``. ``note`` is a warning
         string when the model was not configured or the call failed; the
@@ -372,55 +391,84 @@ class Normalizer:
         hint as "use the deterministic parsers alone", which is what already
         happened before this method existed).
         """
-        rows: list[dict[str, Any]] = []
-        keys: list[tuple[str, int]] = []
-        for branch, observations, _category in branches:
-            for index, observation in enumerate(observations):
-                keys.append((branch, index))
-                rows.append({
-                    "index": len(rows),
-                    "raw_metric": observation.metric,
-                    "raw_value": observation.value,
-                    "raw_unit": observation.unit,
-                })
-        if not rows:
-            return {}, None
-
-        known_metrics = sorted(cm.all_canonical_metrics())
-        schema = {
-            "items": [{
-                "index": "the integer index supplied",
-                "canonical_metric": known_metrics + ["unmapped"],
-                "value": "clean numeric value implied by raw_value, or null",
-                "is_percent": "true if the value is already in percent units",
-            }],
-        }
-        prompt = (
-            f"Company: {self.plan.company} (ticker {self.ticker or 'unknown'}).\n"
-            f"Raw data points: {rows}\n"
-            f"Return this JSON shape: {schema}"
-        )
-        response, error = await safe_complete_json(
-            self._model_config, _LLM_SYSTEM_PROMPT, prompt,
-            tracker=self._tracker, stage="normalisation")
-        if response is None:
-            return {}, (
-                f"LLM-assisted normalisation was skipped ({error}); the deterministic "
-                "parsers ran alone."
-            )
-
+        if self._model_config is None or not self._model_config.enabled:
+            return {}, "no LLM model configured; deterministic parsers ran alone."
         hints: dict[tuple[str, int], dict[str, Any]] = {}
-        for row in response.payload.get("items", []) if isinstance(response.payload, dict) else []:
-            if not isinstance(row, dict):
-                continue
-            try:
-                position = int(row.get("index"))
-            except (TypeError, ValueError):
-                continue
-            if not (0 <= position < len(keys)):
-                continue
-            hints[keys[position]] = row
-        return hints, None
+        failures: list[str] = []
+        known_metrics = sorted(cm.all_canonical_metrics())
+        schema = {"items": [{
+            "index": "the integer index supplied",
+            "canonical_metric": known_metrics + ["unmapped"],
+        }]}
+
+        for branch, observations, _category in branches:
+            # Map one representative metric shape to every unresolved row that
+            # shares it. Array indices are intentionally collapsed: e.g.
+            # ``NVDA.184.PX_LAST`` and ``NVDA.185.PX_LAST`` are one shape.
+            grouped: dict[str, list[tuple[int, RawObservation]]] = {}
+            for index, observation in enumerate(observations):
+                _metric, known = cm.canonicalise_metric(observation.metric)
+                if known:
+                    continue
+                shape = self._metric_shape(observation.metric)
+                grouped.setdefault(shape, []).append((index, observation))
+
+            representatives = sorted(
+                grouped.items(), key=lambda entry: self._metric_priority(entry[0]), reverse=True)
+            skipped = max(0, len(representatives) - _LLM_MAX_SHAPES_PER_SECTION)
+            representatives = representatives[:_LLM_MAX_SHAPES_PER_SECTION]
+            if skipped:
+                failures.append(
+                    f"{branch}: skipped LLM classification for {skipped} low-priority metric shapes "
+                    "(deterministic unmapped handling retained them)")
+            for offset in range(0, len(representatives), _LLM_METRIC_SHAPES_PER_BATCH):
+                chunk = representatives[offset:offset + _LLM_METRIC_SHAPES_PER_BATCH]
+                rows = [
+                    {"index": position, "raw_metric": shape,
+                     "example_unit": records[0][1].unit,
+                     "example_value": str(records[0][1].value)[:80]}
+                    for position, (shape, records) in enumerate(chunk)
+                ]
+                prompt = (
+                    f"Company: {self.plan.company} (ticker {self.ticker or 'unknown'}).\n"
+                    f"Provider section: {branch}; metric-shape batch "
+                    f"{offset // _LLM_METRIC_SHAPES_PER_BATCH + 1}.\n"
+                    f"Metric shapes: {rows}\nReturn this JSON shape: {schema}"
+                )
+                response, error = await safe_complete_json(
+                    self._model_config, _LLM_SYSTEM_PROMPT, prompt,
+                    tracker=self._tracker, stage=f"normalisation:{branch}")
+                if response is None:
+                    failures.append(f"{branch} batch {offset // _LLM_METRIC_SHAPES_PER_BATCH + 1}: {error}")
+                    continue
+                for row in response.payload.get("items", []) if isinstance(response.payload, dict) else []:
+                    if not isinstance(row, dict):
+                        continue
+                    try:
+                        position = int(row.get("index"))
+                    except (TypeError, ValueError):
+                        continue
+                    if not (0 <= position < len(chunk)):
+                        continue
+                    _shape, records = chunk[position]
+                    for observation_index, _observation in records:
+                        hints[(branch, observation_index)] = row
+        note = None
+        if failures:
+            note = ("Some LLM metric-classification batches failed; deterministic parsing ran for "
+                    f"those rows ({'; '.join(failures[:3])}{'...' if len(failures) > 3 else ''}).")
+        return hints, note
+
+    @staticmethod
+    def _metric_shape(metric: str) -> str:
+        """Collapse array indexes without changing the provider's field names."""
+        return re.sub(r"(?<=\.)\d+(?=\.|$)", "#", str(metric))
+
+    @staticmethod
+    def _metric_priority(shape: str) -> int:
+        """Bound LLM work to fields plausibly useful to a research report."""
+        lowered = shape.lower()
+        return sum(1 for term in _LLM_METRIC_TERMS if term in lowered)
 
     # -- passage normalisation -------------------------------------------
     def _normalise_passage(self, passage: RawDocumentPassage) -> EvidenceItem:
@@ -453,6 +501,11 @@ class Normalizer:
             source_name=passage.source.source_name,
             source_type=passage.source.source_type,
             source_url=passage.source.source_url,
+            retrieval_provider=passage.source.retrieval_provider,
+            retrieval_url=passage.source.retrieval_url,
+            original_source_name=passage.source.original_source_name,
+            original_source_url=passage.source.original_source_url,
+            original_publication_date=normalise_date(passage.source.original_publication_date, field_name="original_publication_date"),
             claim_text=self._collapse_whitespace(text),
             document_title=passage.title.strip(),
             published_at=published_at,

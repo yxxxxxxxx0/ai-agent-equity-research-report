@@ -136,6 +136,69 @@ def check_claims_are_supported(context: QAContext) -> list[QAFinding]:
     return findings
 
 
+def check_numeric_claims_use_canonical_evidence(context: QAContext) -> list[QAFinding]:
+    """P0: document text is context, not a structured numerical fact."""
+    findings: list[QAFinding] = []
+    numeric = re.compile(r"(?:[$€£]\s*)?\d+(?:[,.]\d+)*(?:\s*(?:%|x|million|billion|bn|m))?", re.I)
+    for section in context.draft.sections:
+        for statement in section.statements:
+            if not numeric.search(statement.text) or statement.analytics_ids:
+                continue
+            cited = [context.reader.get(eid) for eid in statement.evidence_ids]
+            cited = [item for item in cited if item is not None]
+            if cited and any(item.value is not None and item.is_canonical and item.status.value == "validated" for item in cited):
+                continue
+            findings.append(QAFinding(
+                check="evidence.numeric_claim_not_canonical",
+                severity=Severity.CRITICAL,
+                message="Numeric narrative claim has no validated canonical observation or derived analytic.",
+                section=section.section.value,
+                subject=statement.text,
+                details={"evidence_ids": list(statement.evidence_ids)},
+            ))
+    return findings
+
+
+def check_accounting_identities(context: QAContext) -> list[QAFinding]:
+    """P0 deterministic checks when compatible canonical inputs coexist."""
+    findings: list[QAFinding] = []
+    for period in context.reader.periods():
+        revenue = context.reader.numeric("revenue", period)
+        identities = (
+            ("gross_margin", "gross_profit", "gross_margin"),
+            ("operating_margin", "operating_income", "operating_margin"),
+        )
+        if revenue and revenue.value:
+            for code, numerator_metric, margin_metric in identities:
+                numerator = context.reader.numeric(numerator_metric, period)
+                margin = context.reader.numeric(margin_metric, period)
+                if not numerator or not margin:
+                    continue
+                calculated = numerator.value / revenue.value * 100.0
+                if abs(calculated - margin.value) > 0.1:
+                    findings.append(QAFinding(
+                        check=f"accounting.{code}", severity=Severity.CRITICAL,
+                        message=(f"{period} {margin_metric}={margin.value:.3f}% does not "
+                                 f"reconcile to {calculated:.3f}% from canonical inputs."),
+                        subject=period,
+                        details={"evidence_ids": [revenue.evidence_id, numerator.evidence_id, margin.evidence_id]},
+                    ))
+        ocf = context.reader.numeric("operating_cash_flow", period)
+        capex = context.reader.numeric("capital_expenditure", period)
+        fcf = context.reader.numeric("free_cash_flow", period)
+        if ocf and capex and fcf:
+            # Accept either positive capex (cash spent) or negative cash-flow presentation.
+            candidates = (ocf.value - abs(capex.value), ocf.value + capex.value)
+            if min(abs(fcf.value - value) for value in candidates) > max(1.0, abs(fcf.value) * 0.005):
+                findings.append(QAFinding(
+                    check="accounting.free_cash_flow", severity=Severity.CRITICAL,
+                    message=f"{period} free cash flow does not reconcile to operating cash flow less capex.",
+                    subject=period,
+                    details={"evidence_ids": [ocf.evidence_id, capex.evidence_id, fcf.evidence_id]},
+                ))
+    return findings
+
+
 def check_citation_numbering(context: QAContext) -> list[QAFinding]:
     """Printed reference numbers must resolve to a citation in the source list."""
     findings: list[QAFinding] = []
@@ -731,6 +794,8 @@ def _step_key(key: str) -> int:
 ALL_CHECKS = (
     check_references_exist,
     check_claims_are_supported,
+    check_numeric_claims_use_canonical_evidence,
+    check_accounting_identities,
     check_citation_numbering,
     check_evidence_confidence,
     check_analytics_recompute,

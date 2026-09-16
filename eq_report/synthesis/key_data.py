@@ -29,7 +29,7 @@ from ..normalisation.units import format_number
 #: Metrics the panel already states, and which body tables must therefore not
 #: repeat. Kept next to the panel definition so the two can never drift.
 PANEL_METRICS: frozenset[str] = frozenset({
-    cm.SHARE_PRICE, cm.MARKET_CAP, cm.ENTERPRISE_VALUE, cm.SHARES_OUTSTANDING,
+    cm.SHARE_PRICE, cm.MARKET_CAP, cm.ENTERPRISE_VALUE,
     cm.AVG_VOLUME_30D, cm.PRICE_52W_HIGH, cm.PRICE_52W_LOW,
     cm.FORWARD_PE, cm.TRAILING_PE, cm.EV_TO_SALES, cm.PRICE_TARGET,
     cm.CONSENSUS_RATING,
@@ -52,7 +52,6 @@ def build_key_data_panel(reader: EvidenceReader) -> KeyDataPanel | None:
             _line(reader, cm.MARKET_CAP, "Market cap"),
             _line(reader, cm.ENTERPRISE_VALUE, "Enterprise value"),
             _range_line(reader),
-            _line(reader, cm.SHARES_OUTSTANDING, "Shares outstanding"),
             _line(reader, cm.AVG_VOLUME_30D, "Avg volume (30d)"),
         ]),
         _group("Valuation", [

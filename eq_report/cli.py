@@ -12,6 +12,7 @@ import argparse
 import datetime as dt
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from .config import Settings
@@ -28,6 +29,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--report-date", required=True,
                         help="report as-of date (YYYY-MM-DD)")
     parser.add_argument("--output-dir", type=Path, help="where to write run artefacts")
+    parser.add_argument("--technical-appendix", action="store_true",
+                        help="append the one-page technical-analysis supplement")
+    parser.add_argument("--compact-report", action="store_true",
+                        help="also write a two-page investment brief with technical analysis")
     parser.add_argument("--print-request", action="store_true",
                         help="print the normalized request and exit")
     return parser
@@ -54,6 +59,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     settings = Settings.from_env(output_dir=args.output_dir)
+    if args.technical_appendix or args.compact_report:
+        settings = replace(
+            settings,
+            technical_appendix=settings.technical_appendix or args.technical_appendix,
+            compact_report=settings.compact_report or args.compact_report,
+        )
     result = generate_report_sync(request, settings)
 
     print()
@@ -64,6 +75,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"PDF         : {result.pdf_path}")
     if result.annotated_pdf_path:
         print(f"annotated   : {result.annotated_pdf_path}")
+    if result.compact_pdf_path:
+        print(f"compact PDF : {result.compact_pdf_path}")
     if result.run_manifest_path:
         print(f"run manifest: {result.run_manifest_path}")
 

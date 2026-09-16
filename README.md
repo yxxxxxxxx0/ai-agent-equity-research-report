@@ -140,15 +140,15 @@ eq_report/
 │   └── openrouter_client.py         #   OpenRouter chat-completions client for the planner
 │
 ├── llm/client.py                    #   generic OpenRouter JSON-mode client, shared by the
-│                                     #   segment agents, synthesis and ArcticDB fiscal-period
+│                                     #   segment agents and synthesis
 │                                     #   resolution — output validated, never trusted directly
 │
 ├── providers/                       # 3. acquisition interfaces + implementations
 │   ├── base.py                      #   DataProvider / MarketData / Fundamentals / Documents ABCs
-│   ├── registry.py                  #   config-driven selection; ArcticDB > Megadata > HTTP > mock
+│   ├── registry.py                  #   config-driven selection; Megadata > HTTP/online > mock
 │   ├── sample_data.py               #   ★ ALL synthetic data lives here, nowhere else
 │   ├── megadata.py                  #   real HTTP provider set (enabled by EQR_MEGADATA_BASE_URL)
-│   ├── arcticdb/                    #   real provider set backed by ArcticDB (enabled by
+│   ├── arcticdb/                    #   legacy inactive adapter retained for reference
 │   │   ├── client.py · market_data.py · fundamentals.py · documents.py
 │   │   └── fiscal_period.py         #   optionally uses the generic OpenRouter client to
 │   │                                 #   resolve fiscal-period labels
@@ -433,7 +433,7 @@ log stream for cost tracking.
 ### 5b. Data acquisition fallback: OpenRouter web search
 
 Provider selection per branch (market data / fundamentals / documents) is:
-**ArcticDB > Megadata > a vendor HTTP client (market data only) > OpenRouter
+**Megadata > a vendor HTTP client (market data only) > OpenRouter
 web search > mock**. The new tier, `providers/openrouter_search.py`, only
 engages when no real feed above it is configured *and* an OpenRouter API key
 is set (the same `EQR_MODEL_API_KEY`/`OPENROUTER_API_KEY` as §5a — no separate
@@ -650,7 +650,7 @@ that run still carries evidence or analytics references.
 | `MockDocumentsProvider` | **mock** | `is_mock=True`. 10 documents / 21 passages: earnings release, 10-Q, transcript, deck, two announcements, two news items, a competitor filing, industry research. URLs are `example.invalid`. |
 | `HttpMarketDataProvider` | **real, unexercised** | Genuine REST client. Disabled without `EQR_MARKET_DATA_API_KEY` + `EQR_MARKET_DATA_BASE_URL`; the registry then uses the mock. Tested for the *skip* path only — never run against a live endpoint. |
 | `providers/megadata.py` | **real, network-dependent** | Real HTTP provider set, enabled by `EQR_MEGADATA_BASE_URL`. Falls back to mock if the endpoint is unreachable within `EQR_PROVIDER_TIMEOUT_SECONDS`. |
-| `providers/arcticdb/` | **real, network-dependent** | Real provider set backed by ArcticDB, enabled by `EQR_ARCTICDB_URI`; checked first, ahead of Megadata. `fiscal_period.py` can optionally call the OpenRouter client to resolve fiscal-period labels. |
+| `providers/arcticdb/` | **inactive legacy code** | Retained for reference but no longer selected or configured by the runtime pipeline. |
 | `ResearchPlanner` ticker resolution | **13-entry lookup** | Not a security master. An unresolved name plans without a ticker and records it. |
 | `EvidenceReader.documents_matching` | **substring keyword match** | Deliberately transparent. The natural place for embeddings later; no agent would change. |
 | LLM usage | **optional, implemented, off by default** | `ModelConfig` is used: `ResearchPlanner` plans via GPT through OpenRouter whenever `EQR_MODEL_API_KEY` is set; `LLMSegmentAgent` and `LLMSynthesizer` additionally replace their deterministic counterparts under `EQR_MODEL_USE_FOR_AGENTS`/`EQR_MODEL_USE_FOR_SYNTHESIS`. All three are constrained to cite only ids they were actually shown. With no model variables set, behaviour is unchanged from a fully deterministic run. |

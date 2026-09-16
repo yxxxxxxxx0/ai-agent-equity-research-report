@@ -46,7 +46,8 @@ class ProviderCredentials:
     sec_user_agent: str | None = None
     megadata_base_url: str | None = None
     megadata_api_key: str | None = None
-    arcticdb_uri: str | None = None
+    megadata_username: str | None = None
+    megadata_password: str | None = None
 
     def has_market_data(self) -> bool:
         return bool(self.market_data_api_key)
@@ -60,8 +61,8 @@ class ProviderCredentials:
     def has_megadata(self) -> bool:
         return bool(self.megadata_base_url)
 
-    def has_arcticdb(self) -> bool:
-        return bool(self.arcticdb_uri)
+    def has_megadata_basic_auth(self) -> bool:
+        return bool(self.megadata_username and self.megadata_password)
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,7 +126,20 @@ class Settings:
     # additional model call, using OpenRouter's web plugin), so - like
     # research_data_gaps - it needs its own opt-in.
     check_data_freshness: bool = False
+    # Best-effort live web verification (see qa.engine._adjudicate_metric_conflicts)
+    # of a metric the deterministic checks found two sources disagreeing on: the
+    # model is asked to find the real value from an actual, dated, source-linked
+    # page (OpenRouter's web plugin) and may only unblock QA by matching a
+    # candidate to that verified source - it is never allowed to just pick
+    # whichever value seems more plausible. A genuine extra cost per conflict,
+    # so - like research_data_gaps - it needs its own opt-in.
+    verify_metric_conflicts: bool = False
     online_sources: bool = False
+    # Appends Bloomberg/MegadataAPI technical analysis to every full report.
+    technical_appendix: bool = True
+    # Produces a second, two-page investment brief from the same validated
+    # report draft.  The normal PDF is always retained as the long report.
+    compact_report: bool = True
     # Planning is the one stage that sets its own reasoning effort, since it is
     # a single call that shapes every downstream stage's scope (which sections,
     # which peers, which questions) - worth spending more inference on even
@@ -152,7 +166,13 @@ class Settings:
             research_data_gaps=_env_bool("RESEARCH_DATA_GAPS", False),
             research_data_gaps_max=_env_int("RESEARCH_DATA_GAPS_MAX", 8),
             check_data_freshness=_env_bool("CHECK_DATA_FRESHNESS", False),
+            verify_metric_conflicts=_env_bool("VERIFY_METRIC_CONFLICTS", False),
             online_sources=_env_bool("ONLINE_SOURCES", False),
+            # Both deliverables are contractual pipeline outputs. Environment
+            # flags are retained for backwards-compatible wrappers but may no
+            # longer suppress either version.
+            technical_appendix=True,
+            compact_report=True,
             planning_reasoning_effort=_env("PLANNING_REASONING_EFFORT"),
             credentials=ProviderCredentials(
                 market_data_api_key=_env("MARKET_DATA_API_KEY"),
@@ -164,7 +184,8 @@ class Settings:
                 sec_user_agent=_env("SEC_USER_AGENT"),
                 megadata_base_url=_env("MEGADATA_BASE_URL"),
                 megadata_api_key=_env("MEGADATA_API_KEY"),
-                arcticdb_uri=_env("ARCTICDB_URI"),
+                megadata_username=_env("MEGADATA_USERNAME"),
+                megadata_password=_env("MEGADATA_PASSWORD"),
             ),
             model=ModelConfig(
                 provider=_env("MODEL_PROVIDER", "openrouter") or "openrouter",
@@ -198,14 +219,16 @@ class Settings:
             "research_data_gaps": self.research_data_gaps,
             "research_data_gaps_max": self.research_data_gaps_max,
             "check_data_freshness": self.check_data_freshness,
+            "verify_metric_conflicts": self.verify_metric_conflicts,
             "online_sources": self.online_sources,
+            "technical_appendix": self.technical_appendix,
+            "compact_report": self.compact_report,
             "planning_reasoning_effort": self.planning_reasoning_effort,
             "credentials_present": {
                 "market_data": self.credentials.has_market_data(),
                 "fundamentals": self.credentials.has_fundamentals(),
                 "documents": self.credentials.has_documents(),
                 "megadata": self.credentials.has_megadata(),
-                "arcticdb": self.credentials.has_arcticdb(),
             },
             "model": {
                 "provider": self.model.provider,

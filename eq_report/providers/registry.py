@@ -14,9 +14,6 @@ from ..config import Settings
 from ..errors import ConfigurationError
 from ..llm.usage import UsageTracker
 from ..logging_setup import get_logger, log_event
-from .arcticdb.documents import ArcticDBDocumentsProvider
-from .arcticdb.fundamentals import ArcticDBFundamentalsProvider
-from .arcticdb.market_data import ArcticDBMarketProvider
 from .base import DocumentsProvider, FundamentalsProvider, MarketDataProvider
 from .documents.mock_provider import MockDocumentsProvider
 from .fundamentals.mock_provider import MockFundamentalsProvider
@@ -40,8 +37,6 @@ class ProviderRegistry:
         self._tracker = tracker
 
     def market_data_providers(self) -> tuple[MarketDataProvider, ...]:
-        if self.settings.credentials.has_arcticdb():
-            return (ArcticDBMarketProvider(self.settings),)
         if self.settings.credentials.has_megadata():
             return (MegadataMarketProvider(self.settings),)
         if self.settings.online_sources:
@@ -52,8 +47,6 @@ class ProviderRegistry:
         return (self._mock(MockMarketDataProvider(self.settings), "market_data"),)
 
     def fundamentals_providers(self) -> tuple[FundamentalsProvider, ...]:
-        if self.settings.credentials.has_arcticdb():
-            return (ArcticDBFundamentalsProvider(self.settings, tracker=self._tracker),)
         if self.settings.credentials.has_megadata():
             return (MegadataFundamentalsProvider(self.settings),)
         if self.settings.online_sources:
@@ -63,8 +56,6 @@ class ProviderRegistry:
         return (self._mock(MockFundamentalsProvider(self.settings), "fundamentals"),)
 
     def documents_providers(self) -> tuple[DocumentsProvider, ...]:
-        if self.settings.credentials.has_arcticdb():
-            return (ArcticDBDocumentsProvider(self.settings),)
         if self.settings.credentials.has_megadata():
             return (MegadataDocumentsProvider(self.settings),)
         if self.settings.online_sources:

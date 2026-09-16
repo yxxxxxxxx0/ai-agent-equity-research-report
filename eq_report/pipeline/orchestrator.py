@@ -45,6 +45,8 @@ from ..planning.research_planner import ResearchPlanner
 from ..qa.engine import QAEngine
 from ..rendering.json_writer import write_json, write_report_json, write_run_manifest
 from ..rendering.pdf_renderer import PdfReportRenderer
+from ..rendering.compact_renderer import render_compact_report
+from ..rendering.technical_appendix import append_technical_appendix
 from ..synthesis.annotate import build_annotations
 from ..synthesis.llm_synthesizer import LLMSynthesizer
 from ..synthesis.synthesizer import Synthesizer
@@ -66,6 +68,7 @@ class ReportResult:
     qa_result: QAResult | None = None
     pdf_path: Path | None = None
     annotated_pdf_path: Path | None = None
+    compact_pdf_path: Path | None = None
     report_json_path: Path | None = None
     run_manifest_path: Path | None = None
 
@@ -79,6 +82,8 @@ class ReportResult:
             parts.append(f"pdf={self.pdf_path}")
         if self.annotated_pdf_path:
             parts.append(f"annotated_pdf={self.annotated_pdf_path}")
+        if self.compact_pdf_path:
+            parts.append(f"compact_pdf={self.compact_pdf_path}")
         if self.qa_result:
             parts.append(
                 f"qa: {len(self.qa_result.critical)} critical, "
@@ -279,7 +284,8 @@ async def generate_report(
         # 7. QA ----------------------------------------------------------
         with tracker.stage("qa"):
             qa_result = await QAEngine(
-                model_config=settings.model, tracker=usage_tracker
+                model_config=settings.model, tracker=usage_tracker,
+                verify_conflicts=settings.verify_metric_conflicts,
             ).validate(draft, plan, reader, analytics)
             tracker.set_qa(qa_result.to_dict())
             write_json(run_dir / "07_qa.json", qa_result.to_dict())
@@ -290,6 +296,14 @@ async def generate_report(
             log_event(logger, logging.ERROR, "PDF suppressed by QA",
                       critical=len(qa_result.critical))
             tracker.set_outputs(json_path=str(report_json_path), pdf_path=None)
+            write_json(run_dir / "validation_failure.json", {
+                "report_run_id": report_run_id,
+                "publication_blocked": True,
+                "p0_count": len(qa_result.critical),
+                "p1_count": len(qa_result.warnings),
+                "p2_count": len(qa_result.infos),
+                "required_fixes": [finding.to_dict() for finding in qa_result.critical],
+            })
             run, manifest = _finish_with_usage(
                 tracker, usage_tracker, RunStatus.FAILED_QA, run_dir)
             return ReportResult(
@@ -301,6 +315,56 @@ async def generate_report(
         # 8. PDF ---------------------------------------------------------
         with tracker.stage("pdf"):
             pdf_path = PdfReportRenderer(run_dir).render(draft, qa_result)
+        compact_pdf_path: Path | None = None
+
+        # The technical page is deliberately appended only after the core PDF
+        # succeeds.  A market-data outage therefore never suppresses the
+        # evidence-backed report; it leaves a warning and preserves the base
+        # PDF instead.
+        if settings.technical_appendix:
+            with tracker.stage("technical_appendix"):
+                try:
+                    technical_pdf_path = run_dir / (
+                        f"{plan.ticker}_{plan.request.report_date:%Y%m%d}_"
+                        f"{report_run_id}_with_technical_appendix.pdf"
+                    )
+                    pdf_path = append_technical_appendix(
+                        pdf_path, technical_pdf_path, plan.ticker,
+                        plan.request.report_date,
+                        credentials=settings.credentials,
+                        timeout=settings.provider_timeout_seconds,
+                    )
+                except Exception as exc:  # noqa: BLE001 - non-core supplement
+                    log_event(logger, logging.WARNING, "technical appendix failed",
+                              error=f"{type(exc).__name__}: {exc}")
+                    tracker.warn(
+                        f"Technical appendix could not be generated: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+
+        # The compact version is a separate deliverable, not a replacement:
+        # it reuses the validated report JSON and appends its own technical
+        # page, so callers receive both the full narrative and the two-page
+        # decision brief from one run.
+        if settings.compact_report:
+            with tracker.stage("compact_pdf"):
+                try:
+                    compact_target = run_dir / (
+                        f"{plan.ticker}_{plan.request.report_date:%Y%m%d}_"
+                        f"{report_run_id}_compact_two_page.pdf"
+                    )
+                    compact_pdf_path = render_compact_report(
+                        report_json_path, compact_target,
+                        credentials=settings.credentials,
+                        timeout=settings.provider_timeout_seconds,
+                    )
+                except Exception as exc:  # noqa: BLE001 - keep the long report final
+                    log_event(logger, logging.WARNING, "compact PDF failed",
+                              error=f"{type(exc).__name__}: {exc}")
+                    tracker.warn(
+                        f"Compact two-page report could not be generated: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
 
         # 8.5 Annotated companion PDF (best-effort) -----------------------
         # Never gates the primary result: a failure here is logged and
@@ -329,11 +393,13 @@ async def generate_report(
 
         log_event(logger, logging.INFO, "report run complete",
                   status=status.value, pdf=str(pdf_path),
-                  annotated_pdf=str(annotated_pdf_path) if annotated_pdf_path else None,
+            annotated_pdf=str(annotated_pdf_path) if annotated_pdf_path else None,
+                  compact_pdf=str(compact_pdf_path) if compact_pdf_path else None,
                   duration_ms=round(run.duration_ms or 0, 1))
         return ReportResult(
             report_run_id=report_run_id, status=status, run=run, draft=draft,
             qa_result=qa_result, pdf_path=pdf_path, annotated_pdf_path=annotated_pdf_path,
+            compact_pdf_path=compact_pdf_path,
             report_json_path=report_json_path, run_manifest_path=manifest,
         )
 

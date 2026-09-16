@@ -146,6 +146,8 @@ _KNOWN_TICKERS: dict[str, str] = {
     "amazon": "AMZN",
     "meta": "META",
     "tesla": "TSLA",
+    "sandisk": "SNDK",
+    "sndk": "SNDK",
 }
 
 # Default peer sets used when the user does not supply peers.
@@ -153,6 +155,8 @@ _DEFAULT_PEERS: dict[str, tuple[str, ...]] = {
     "NVDA": ("AMD", "INTC", "AVGO"),
     "AMD": ("NVDA", "INTC", "AVGO"),
     "INTC": ("NVDA", "AMD", "AVGO"),
+    "SNDK": ("WDC", "MU", "STX"),
+    "TSLA": ("GM", "F", "BYDDY"),
 }
 
 # Which segment agent owns which requested report section.
@@ -393,7 +397,11 @@ class ResearchPlanner:
             "Design questions and tasks that cover every outline section by mapping them onto "
             "the closest allowed segment. Identify 2-4 economic drivers, external validation, "
             "management guidance, consensus revisions, market-implied expectations, 2-3 debates, "
-            "dated catalysts and 5-10 monitoring KPIs. Do not assert answers.\n"
+            "dated catalysts and 5-10 monitoring KPIs. Always research 2-4 recent, named KOLs "
+            "(recognised industry specialists, institutional analysts or relevant executives), "
+            "preserving speaker, role, date, source URL and whether each statement is observation, "
+            "forecast or opinion. Seek contrasting views where available; never present KOL opinion "
+            "as fact. Do not assert answers.\n"
             "Return the concrete data_requests and search_requests needed to answer the plan. "
             "Use API data for structured market/fundamental/filing fields and search only for "
             "qualitative developments, causal evidence, debates and missing context.\n"
@@ -420,24 +428,39 @@ class ResearchPlanner:
             metric for values in _SEGMENT_ANALYTICS.values() for metric in values
         }
         tasks: list[SegmentTask] = []
-        seen_segments: set[SegmentName] = set()
+        task_positions: dict[SegmentName, int] = {}
         for row in payload.get("segment_tasks", []):
             segment = SegmentName(str(row["segment"]))
-            if segment in seen_segments:
-                raise ValueError(f"Model research plan duplicated segment {segment.value}")
-            seen_segments.add(segment)
             qids = tuple(str(q) for q in row.get("question_ids", []) if str(q) in question_ids)
             analytics = tuple(
                 str(metric) for metric in row.get("required_analytics", [])
                 if str(metric) in allowed_analytics
             )
-            tasks.append(SegmentTask(
+            incoming = SegmentTask(
                 segment=segment,
                 objective=str(row["objective"]),
                 question_ids=qids,
                 required_metrics=tuple(str(m) for m in row.get("required_metrics", [])),
                 required_analytics=analytics,
-            ))
+            )
+            # Models occasionally emit two complementary tasks for the same
+            # allowed segment. Merge those instead of failing an otherwise
+            # usable plan: the runner still receives exactly one task per
+            # segment, with the union of questions and data requirements.
+            if segment in task_positions:
+                position = task_positions[segment]
+                current = tasks[position]
+                tasks[position] = SegmentTask(
+                    segment=segment,
+                    objective=current.objective or incoming.objective,
+                    question_ids=tuple(dict.fromkeys((*current.question_ids, *incoming.question_ids))),
+                    required_metrics=tuple(dict.fromkeys((*current.required_metrics, *incoming.required_metrics))),
+                    required_analytics=tuple(dict.fromkeys((*current.required_analytics, *incoming.required_analytics))),
+                )
+            else:
+                task_positions[segment] = len(tasks)
+                tasks.append(incoming)
+        seen_segments = set(task_positions)
         expected_segments = set(self._segments_for(request.sections))
         missing_segments = expected_segments - seen_segments
         if missing_segments:
@@ -504,6 +527,24 @@ class ResearchPlanner:
                 continue
             skipped_notes.append(
                 f"Model requested unsupported search endpoint {endpoint!r}; skipped.")
+        existing_ids = {search.request_id for search in search_requests}
+        kol_requests = (
+            SearchRequest(
+                request_id="kol_named_expert_views",
+                endpoint="/api/vector-search/search",
+                query=(f"{ticker} named analyst industry expert KOL commentary view "
+                       f"speaker role date source through {request.report_date.isoformat()}"),
+                purpose="Capture attributable expert views and distinguish opinion from fact.",
+            ),
+            SearchRequest(
+                request_id="kol_counterview_news",
+                endpoint="/api/news/data",
+                query=(f"{ticker} analyst expert view risk counterargument industry outlook "
+                       f"through {request.report_date.isoformat()}"),
+                purpose="Find a dated counterview or risk framing from a named external expert.",
+            ),
+        )
+        search_requests.extend(req for req in kol_requests if req.request_id not in existing_ids)
         if not data_requests:
             raise ValueError("Model research plan contained no Megadata API requests")
         return ResearchPlan(

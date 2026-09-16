@@ -461,12 +461,18 @@ class PdfReportRenderer:
 
         for citation in draft.citations:
             label = "[sample data] " if citation.is_mock else ""
-            url = (
-                f" &lt;{_escape(citation.source_url)}&gt;"
-                if citation.source_url else ""
-            )
+            anchor = f'<a name="cite_{citation.ref_number}"/>'
+            if citation.source_url:
+                href = _escape(citation.source_url)
+                marker = (
+                    f'<a href="{href}" color="#12395e">[{citation.ref_number}]</a>'
+                )
+                url = f' <a href="{href}" color="#12395e">&lt;{href}&gt;</a>'
+            else:
+                marker = f"<font color='#12395e'>[{citation.ref_number}]</font>"
+                url = ""
             story.append(Paragraph(
-                f"<font color='#12395e'>[{citation.ref_number}]</font> "
+                f"{anchor}{marker} "
                 f"{label}{_escape(citation.text)}{url}",
                 styles["source"],
             ))
@@ -897,7 +903,12 @@ class PdfReportRenderer:
         return [Paragraph(f"Data gaps ({len(gaps)})", styles["tabletitle"]), table]
 
     def _statement_html(self, statement) -> str:
-        refs = "".join(f"[{r}]" for r in statement.citation_refs)
+        # Each ref is an internal link to its anchor in the source list
+        # (_back_matter), so clicking [n] in the body jumps straight to it.
+        refs = "".join(
+            f'<a href="#cite_{r}" color="#12395e">[{r}]</a>'
+            for r in statement.citation_refs
+        )
         tag = _CLAIM_TAGS.get(statement.claim_type, statement.claim_type.value)
         return (
             f"{_escape(statement.text)} "
