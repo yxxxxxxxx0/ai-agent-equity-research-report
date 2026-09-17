@@ -170,8 +170,45 @@ def _volatility(close: list[float], period: int) -> list[float | None]:
     return result
 
 
+#: Evenly spaced x-axis date ticks per technical-appendix panel. Enough to
+#: place a reader anywhere in the 90-session window without crowding a panel
+#: this size (the price chart in the main report uses the same tick count
+#: for the same reason - see pdf_renderer.py::_LINE_CHART_TICKS).
+_PANEL_X_TICKS = 5
+
+
+def _draw_x_axis(c: Canvas, x: float, y: float, w: float, dates: list[dt.date]) -> None:
+    """Dated x-axis ticks under a technical-appendix panel.
+
+    Drawn in the gap between the panel's bottom edge and its caption (see the
+    row spacing in build_technical_appendix_pdf) so it never collides with
+    either.
+    """
+    if not dates:
+        return
+    last = max(len(dates) - 1, 1)
+    tick_count = min(_PANEL_X_TICKS, last + 1)
+    steps = sorted({round(last * i / (tick_count - 1)) for i in range(tick_count)}) \
+        if tick_count > 1 else [0]
+    c.setStrokeColor(colors.HexColor("#c8ccd4"))
+    c.setFillColor(colors.HexColor("#5c6470"))
+    c.setFont("Helvetica", 5.6)
+    for i in steps:
+        px = x + w * i / last
+        c.line(px, y, px, y - 2.5)
+        label = dates[i].strftime("%m/%d")
+        if i == 0:
+            c.drawString(px, y - 9, label)
+        elif i == last:
+            c.drawRightString(px, y - 9, label)
+        else:
+            c.drawCentredString(px, y - 9, label)
+
+
 def _plot(c: Canvas, x: float, y: float, w: float, h: float, title: str,
-          series: list[tuple[str, list[float | None], colors.Color]], *, fixed: tuple[float, float] | None = None) -> None:
+          series: list[tuple[str, list[float | None], colors.Color]], *,
+          fixed: tuple[float, float] | None = None,
+          dates: list[dt.date] | None = None) -> None:
     points = [v for _, values, _ in series for v in values if v is not None]
     lo, hi = fixed or (min(points), max(points))
     span = (hi - lo) or 1
@@ -203,6 +240,52 @@ def _plot(c: Canvas, x: float, y: float, w: float, h: float, title: str,
             c.drawString(x + index * (w / len(series)), y + h + 7, label)
     c.setFillColor(colors.HexColor("#5c6470")); c.setFont("Helvetica", 6.5)
     c.drawRightString(x - 3, y + h - 2, _axis_label(hi)); c.drawRightString(x - 3, y - 2, _axis_label(lo))
+    _draw_x_axis(c, x, y, w, dates or [])
+
+
+def _plot_candlestick(
+    c: Canvas, x: float, y: float, w: float, h: float, title: str,
+    dates: list[dt.date], opens: list[float], highs: list[float],
+    lows: list[float], closes: list[float],
+) -> None:
+    """An OHLC candlestick panel, styled to match _plot's frame/axes/x-axis.
+
+    Kept as its own function rather than a branch in _plot: a candle needs
+    four values per session (not one per series) and a per-bar up/down
+    color, which doesn't fit _plot's "one line per series" shape.
+    """
+    lo, hi = min(lows), max(highs)
+    span = (hi - lo) or 1
+    lo, hi = lo - span * .08, hi + span * .08
+    c.setFont("Helvetica-Bold", 8)
+    c.setFillColor(colors.HexColor("#12395e"))
+    c.drawString(x, y + h + 18, title)
+    c.setStrokeColor(colors.HexColor("#c8ccd4")); c.rect(x, y, w, h, stroke=1, fill=0)
+    for level in range(1, 4):
+        yy = y + h * level / 4; c.setStrokeColor(colors.HexColor("#e6e9ee")); c.line(x, yy, x + w, yy)
+
+    up_color, down_color = colors.HexColor("#2f6f5e"), colors.HexColor("#a13f3f")
+    n = len(closes)
+    slot = w / max(n, 1)
+    body_w = max(slot * 0.6, 0.6)
+    for i in range(n):
+        cx = x + slot * (i + 0.5)
+        up = closes[i] >= opens[i]
+        color = up_color if up else down_color
+
+        def sy(value: float) -> float:
+            return y + h * (value - lo) / (hi - lo)
+
+        c.setStrokeColor(color); c.setLineWidth(0.7)
+        c.line(cx, sy(lows[i]), cx, sy(highs[i]))
+        body_lo, body_hi = sorted((sy(opens[i]), sy(closes[i])))
+        body_hi = max(body_hi, body_lo + 0.4)  # a doji still draws a visible sliver
+        c.setFillColor(color)
+        c.rect(cx - body_w / 2, body_lo, body_w, body_hi - body_lo, stroke=0, fill=1)
+
+    c.setFillColor(colors.HexColor("#5c6470")); c.setFont("Helvetica", 6.5)
+    c.drawRightString(x - 3, y + h - 2, _axis_label(hi)); c.drawRightString(x - 3, y - 2, _axis_label(lo))
+    _draw_x_axis(c, x, y, w, dates)
 
 
 def _axis_label(value: float) -> str:
@@ -260,7 +343,7 @@ def build_technical_appendix_pdf(
     rows, source_label = _fetch_bloomberg_ohlcv(
         ticker, end_date, credentials or ProviderCredentials(), timeout=timeout,
     )
-    dates, _, high, low, close, volume = map(list, zip(*rows))
+    dates, open_, high, low, close, volume = map(list, zip(*rows))
     ma10, ma20, ma50 = _sma(close, 10), _sma(close, 20), _sma(close, 50)
     sd10 = _std(close, 10); upper = [None if m is None or s is None else m + 2*s for m, s in zip(ma10, sd10)]; lower = [None if m is None or s is None else m - 2*s for m, s in zip(ma10, sd10)]
     ema12, ema26 = _ema(close, 12), _ema(close, 26); macd = [None if a is None or b is None else a - b for a, b in zip(ema12, ema26)]; signal = _ema([x or 0 for x in macd], 9)
@@ -280,19 +363,20 @@ def build_technical_appendix_pdf(
     rsi_state = "overbought" if rsi[-1] >= 70 else "oversold" if rsi[-1] <= 30 else "neutral"
     macd_state = "above" if macd[-1] >= signal[-1] else "below"
 
-    _plot(c, 45, 635, 225, 105, 'Price', [('Close', s(close), colors.HexColor('#12395e'))])
+    window_dates = s(dates)
+    _plot_candlestick(c, 45, 635, 225, 105, 'Price', window_dates, s(open_), s(high), s(low), s(close))
     _caption(c, 45, 618, 225, f"Close is {price_change:+.1f}% over the 90-session window.")
-    _plot(c, 320, 635, 225, 105, 'Moving averages', [('Close', s(close), colors.HexColor('#12395e')), ('MA 10', s(ma10), colors.HexColor('#d99a2b')), ('MA 20', s(ma20), colors.HexColor('#2f6f5e')), ('MA 50', s(ma50), colors.HexColor('#7a5a9e'))])
+    _plot(c, 320, 635, 225, 105, 'Moving averages', [('Close', s(close), colors.HexColor('#12395e')), ('MA 10', s(ma10), colors.HexColor('#d99a2b')), ('MA 20', s(ma20), colors.HexColor('#2f6f5e')), ('MA 50', s(ma50), colors.HexColor('#7a5a9e'))], dates=window_dates)
     _caption(c, 320, 618, 225, f"Close is {ma20_gap:+.1f}% versus the 20-day average; alignment frames trend direction.")
-    _plot(c, 45, 465, 225, 105, 'Bollinger Bands (10, 2)', [('Close', s(close), colors.HexColor('#12395e')), ('MA 10', s(ma10), colors.HexColor('#d99a2b')), ('Upper', s(upper), colors.HexColor('#8993a1')), ('Lower', s(lower), colors.HexColor('#8993a1'))])
+    _plot(c, 45, 465, 225, 105, 'Bollinger Bands (10, 2)', [('Close', s(close), colors.HexColor('#12395e')), ('MA 10', s(ma10), colors.HexColor('#d99a2b')), ('Upper', s(upper), colors.HexColor('#8993a1')), ('Lower', s(lower), colors.HexColor('#8993a1'))], dates=window_dates)
     _caption(c, 45, 448, 225, f"Close sits at {band_position:.0%} of the 10-day band range; extremes can flag stretched price action.")
-    _plot(c, 320, 465, 225, 105, 'MACD (12, 26, 9)', [('MACD', s(macd), colors.HexColor('#12395e')), ('Signal', s(signal), colors.HexColor('#d99a2b'))])
+    _plot(c, 320, 465, 225, 105, 'MACD (12, 26, 9)', [('MACD', s(macd), colors.HexColor('#12395e')), ('Signal', s(signal), colors.HexColor('#d99a2b'))], dates=window_dates)
     _caption(c, 320, 448, 225, f"MACD is {macd_state} its signal line, a short-term momentum read rather than a valuation signal.")
-    _plot(c, 45, 295, 225, 105, 'On-balance volume (OBV)', [('OBV', s(obv), colors.HexColor('#2f6f5e'))])
+    _plot(c, 45, 295, 225, 105, 'On-balance volume (OBV)', [('OBV', s(obv), colors.HexColor('#2f6f5e'))], dates=window_dates)
     _caption(c, 45, 278, 225, f"OBV moved {obv_change_m:+.0f}m shares over 20 sessions; direction tests volume confirmation.")
-    _plot(c, 320, 295, 225, 105, 'RSI (10-day)', [('RSI', s(rsi), colors.HexColor('#12395e'))], fixed=(0, 100))
+    _plot(c, 320, 295, 225, 105, 'RSI (10-day)', [('RSI', s(rsi), colors.HexColor('#12395e'))], fixed=(0, 100), dates=window_dates)
     _caption(c, 320, 278, 225, f"RSI is {rsi[-1]:.1f} ({rsi_state}); 70/30 are conventional overbought/oversold reference levels.")
-    _plot(c, 45, 100, 500, 110, 'Annualised realised volatility', [('10d', s(vol10), colors.HexColor('#12395e')), ('20d', s(vol20), colors.HexColor('#d99a2b')), ('30d', s(vol30), colors.HexColor('#2f6f5e'))])
+    _plot(c, 45, 100, 500, 110, 'Annualised realised volatility', [('10d', s(vol10), colors.HexColor('#12395e')), ('20d', s(vol20), colors.HexColor('#d99a2b')), ('30d', s(vol30), colors.HexColor('#2f6f5e'))], dates=window_dates)
     _caption(c, 45, 83, 500, f"Annualised realised volatility: {vol10[-1]:.1f}% (10d), {vol20[-1]:.1f}% (20d), and {vol30[-1]:.1f}% (30d); a near-term risk gauge.")
     # The chart is a timing/risk supplement, so it carries a compact,
     # calculation-backed interpretation rather than asking the reader to
