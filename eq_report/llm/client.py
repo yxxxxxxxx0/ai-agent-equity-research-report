@@ -50,14 +50,14 @@ class OpenRouterJSONClient:
 
     async def complete_json(
         self, system_prompt: str, user_prompt: str, *, web_search: bool = False,
-        stage: str = "",
+        stage: str = "", cache_key: str | None = None,
     ) -> LLMJSONResponse:
         return await asyncio.to_thread(
-            self._complete_json_sync, system_prompt, user_prompt, web_search, stage)
+            self._complete_json_sync, system_prompt, user_prompt, web_search, stage, cache_key)
 
     def _complete_json_sync(
         self, system_prompt: str, user_prompt: str, web_search: bool = False,
-        stage: str = "",
+        stage: str = "", cache_key: str | None = None,
     ) -> LLMJSONResponse:
         base_url = self.config.base_url.rstrip("/")
         headers = {
@@ -87,6 +87,13 @@ class OpenRouterJSONClient:
             # the combination.
             "usage": {"include": True},
         }
+        if cache_key:
+            # OpenAI-compatible prompt-cache routing hint: calls sharing a key
+            # are preferentially routed to the same cache-warm backend, so a
+            # shared prompt prefix (see agents/llm_agent.py's cache_key use)
+            # actually gets a cache hit instead of landing on a cold worker.
+            # Providers/models that don't support it ignore the field.
+            request_body["prompt_cache_key"] = cache_key
         if web_search:
             # OpenRouter's web plugin: augments the prompt with live search
             # results before the model answers, regardless of which underlying

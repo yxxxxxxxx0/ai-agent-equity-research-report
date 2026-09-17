@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import replace
 from typing import Any, Protocol
 
 from ..config import ModelConfig
@@ -151,6 +152,7 @@ requested schema."""
 class AgentLLMClient(Protocol):
     async def complete_json(
         self, system_prompt: str, user_prompt: str, *, stage: str = "",
+        cache_key: str | None = None,
     ) -> LLMJSONResponse: ...
 
 
@@ -174,7 +176,16 @@ class LLMSegmentAgent(SegmentAgent):
                     "LLMSegmentAgent requires an enabled ModelConfig or an injected client")
             if model_config.provider.lower() != "openrouter":
                 raise ValueError("LLMSegmentAgent supports MODEL_PROVIDER=openrouter")
-            self._client = OpenRouterJSONClient(model_config, tracker=tracker)
+            # Segment agents select-and-phrase from evidence shown to them and
+            # are validated post hoc - they don't need the heavier (pricier)
+            # model planning/synthesis may warrant. `agent_model`, when set,
+            # swaps only this call's model; every other field (timeout, base
+            # URL, credentials) is unchanged.
+            agent_config = (
+                replace(model_config, model=model_config.agent_model)
+                if model_config.agent_model else model_config
+            )
+            self._client = OpenRouterJSONClient(agent_config, tracker=tracker)
 
     async def _analyse(self, context: AgentContext) -> SegmentResult:
         evidence_rows, evidence_by_id = self._evidence_for(context)
@@ -194,7 +205,17 @@ class LLMSegmentAgent(SegmentAgent):
 
         response = await self._client.complete_json(
             _SYSTEM_PROMPT, self._user_prompt(context, evidence_rows, analytics_rows),
-            stage=f"agent:{self.segment.value}")
+            stage=f"agent:{self.segment.value}",
+            # All 8 segment agents in one run share most of their evidence
+            # pool (point/period metrics, guidance, peer values are fetched
+            # the same way regardless of segment - see _evidence_for). Tagging
+            # every call in a run with the same key lets a provider that
+            # supports prompt-cache routing (e.g. OpenAI's prompt_cache_key)
+            # reuse that shared prefix across the 8 calls instead of paying
+            # full input-token price on each one; providers that ignore the
+            # field simply see it dropped, so this is free to always send.
+            cache_key=f"eq_report-agents-{context.reader.report_run_id}",
+        )
         log_event(
             logger, logging.INFO, "LLM segment agent responded",
             segment=self.segment.value,
@@ -230,8 +251,14 @@ class LLMSegmentAgent(SegmentAgent):
                 "confidence": item.confidence.value,
             })
 
-        wanted_metrics = dict.fromkeys((*_POINT_METRICS, *(task.required_metrics if task else ())))
-        for metric in wanted_metrics:
+        # Shared rows first, segment-specific rows last: every one of the 8
+        # agents fetches _POINT_METRICS/_PERIOD_METRICS/guidance/peer values
+        # the same way, so putting them first gives a byte-identical prefix
+        # across agents in the same run for a cache-aware provider to match
+        # on (see the cache_key passed alongside this prompt in _analyse).
+        # task.required_metrics and the document keyword match are the only
+        # genuinely segment-specific parts, so they run last instead.
+        for metric in dict.fromkeys(_POINT_METRICS):
             add(reader.numeric(metric))
         wanted_period_metrics = dict.fromkeys(_PERIOD_METRICS)
         if latest:
@@ -249,13 +276,21 @@ class LLMSegmentAgent(SegmentAgent):
             add(reader.peer_value(peer, "forward_pe"))
             add(reader.peer_value(peer, "revenue_growth_yoy_reported"))
 
-        # The model is the semantic reranker: include a recent, source-diverse
-        # candidate pool, plus any exact lexical hits first.  It may cite only
-        # ids from this pool, so retrieval remains auditable.
+        # A recent, source-diverse candidate pool - same regardless of
+        # segment, so it stays in the shared block above the cut line.
+        for item in reader.documents(limit=_MAX_DOCUMENT_CANDIDATES):
+            add(item)
+
+        # -- segment-specific from here down: breaks the shared prefix, so it
+        # goes last (see the ordering note above _evidence_for's shared block).
+        for metric in dict.fromkeys(task.required_metrics if task else ()):
+            add(reader.numeric(metric))
+
+        # The model is the semantic reranker: include any exact lexical hits
+        # for this segment's own questions. It may cite only ids from this
+        # pool, so retrieval remains auditable.
         questions = [q.text for q in context.plan.questions_for(self.segment)]
         for item in reader.documents_matching(questions, limit=10):
-            add(item)
-        for item in reader.documents(limit=_MAX_DOCUMENT_CANDIDATES):
             add(item)
 
         return rows, by_id
@@ -330,16 +365,23 @@ class LLMSegmentAgent(SegmentAgent):
                 ),
             }],
         }
+        # The evidence/analytics pool is largely the same set for every one of
+        # the 8 segment agents in a run (see _evidence_for), and each call is
+        # tagged with a shared cache_key (see _analyse). Providers that honour
+        # prompt caching match on a *shared prefix*, so this block - the part
+        # that is actually identical across agents - is placed first, and the
+        # segment-specific instructions (which differ every call and would
+        # otherwise break the shared prefix) are appended last.
         return (
+            f"Evidence candidates (semantically select and cite only the rows relevant "
+            f"to the segment named below; only these ids may be cited): {evidence_rows}\n"
+            f"Analytics rows (only these ids may be cited): {analytics_rows}\n"
+            f"Return this JSON shape: {schema}\n"
+            "Keep the findings in reading order; the report will preserve this order.\n"
             f"Segment: {self.segment.value}\n"
             f"Company: {context.company} ({context.ticker or 'ticker unknown'})\n"
             f"Objective: {context.task.objective if context.task else ''}\n"
             f"Questions to address: {list(self.questions(context))}\n"
-            f"Evidence candidates (semantically select and cite only the rows relevant "
-            f"to this segment; only these ids may be cited): {evidence_rows}\n"
-            f"Analytics rows (only these ids may be cited): {analytics_rows}\n"
-            "Keep the findings in reading order; the report will preserve this order.\n"
-            f"Return this JSON shape: {schema}"
         )
 
     # -- validation ----------------------------------------------------------

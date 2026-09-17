@@ -64,6 +64,19 @@ class ModelConfig:
 
     provider: str = "openrouter"
     model: str = "openai/gpt-5"
+    # Segment agents select-and-phrase from evidence they are shown and are
+    # validated post hoc (see agents/llm_agent.py); they do not need the same
+    # reasoning depth as planning or synthesis. When set, this model is used
+    # for the 8 segment-agent calls only, everything else keeps ``model``.
+    agent_model: str | None = None
+    # Segment names (SegmentName.value, comma-separated) that use their
+    # deterministic, rule-based agent instead of the LLM writer, regardless of
+    # whether a model is configured. These segments are fact-heavy and the
+    # deterministic implementation already writes real prose from evidence
+    # and analytics (see agents/financial_performance.py etc.) - routing them
+    # away from the LLM cuts one full evidence-pool call per segment listed
+    # here, at zero cost in what the section can say.
+    deterministic_segments: frozenset[str] = frozenset()
     base_url: str = "https://openrouter.ai/api/v1"
     max_tokens: int = 16000
     temperature: float = 0.0
@@ -162,6 +175,15 @@ class Settings:
             model=ModelConfig(
                 provider=_env("MODEL_PROVIDER", "openrouter") or "openrouter",
                 model=_env("MODEL_NAME", "openai/gpt-5") or "openai/gpt-5",
+                agent_model=_env("MODEL_NAME_AGENTS"),
+                deterministic_segments=frozenset(
+                    s.strip() for s in (
+                        _env("DETERMINISTIC_SEGMENTS",
+                             "company_snapshot,financial_performance,operating_drivers")
+                        or ""
+                    ).split(",")
+                    if s.strip()
+                ),
                 base_url=(_env("MODEL_BASE_URL", "https://openrouter.ai/api/v1")
                           or "https://openrouter.ai/api/v1"),
                 max_tokens=_env_int("MODEL_MAX_TOKENS", 16000),
@@ -200,6 +222,8 @@ class Settings:
             "model": {
                 "provider": self.model.provider,
                 "model": self.model.model,
+                "agent_model": self.model.agent_model or self.model.model,
+                "deterministic_segments": sorted(self.model.deterministic_segments),
                 "base_url": self.model.base_url,
                 "enabled": self.model.enabled,
             },

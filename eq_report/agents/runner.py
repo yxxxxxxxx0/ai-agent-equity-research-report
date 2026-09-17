@@ -49,13 +49,25 @@ def build_agents(
     plan: ResearchPlan, model_config: ModelConfig | None = None,
     tracker: UsageTracker | None = None,
 ) -> tuple[SegmentAgent, ...]:
-    """Instantiate the agents the plan assigned work to."""
+    """Instantiate the agents the plan assigned work to.
+
+    A segment named in ``model_config.deterministic_segments`` runs its
+    rule-based implementation directly - no LLM call, no evidence-pool cost -
+    instead of the LLM writer every other segment gets. This is a cost
+    control, not a capability gap: the deterministic agents already produce
+    real, evidence-cited prose (see e.g. financial_performance.py), just
+    without the LLM's freeform synthesis.
+    """
+    deterministic = model_config.deterministic_segments if model_config else frozenset()
     agents: list[SegmentAgent] = []
     for task in plan.segment_tasks:
         agent_class = AGENT_REGISTRY.get(task.segment)
         if agent_class is None:
             log_event(logger, logging.WARNING, "no agent implements segment",
                       segment=task.segment.value)
+            continue
+        if task.segment.value in deterministic:
+            agents.append(agent_class())
             continue
         agents.append(VerifiedSegmentAgent(
             task.segment, agent_class(), model_config, tracker=tracker))
