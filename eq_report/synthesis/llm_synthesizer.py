@@ -45,7 +45,7 @@ from ..evidence.reader import EvidenceReader
 from ..llm.client import LLMJSONResponse, OpenRouterJSONClient
 from ..llm.usage import UsageTracker
 from ..logging_setup import get_logger, log_event
-from .synthesizer import Synthesizer
+from .synthesizer import Synthesizer, _tag_matches
 
 logger = get_logger("synthesis.llm_synthesizer")
 
@@ -156,9 +156,9 @@ class LLMSynthesizer(Synthesizer):
             if (result.segment.value, index) not in self._llm_dropped
         )
         if section is ReportSection.RISKS:
-            findings = tuple(f for f in findings if "risk" in f.tags)
+            findings = tuple(f for f in findings if _tag_matches(f.tags, "risk"))
         elif section is ReportSection.CATALYSTS:
-            findings = tuple(f for f in findings if "catalyst" in f.tags)
+            findings = tuple(f for f in findings if _tag_matches(f.tags, "catalyst"))
         return tuple(findings)
 
     def _section_summary(self, section: ReportSection, result: SegmentResult) -> str:
@@ -249,6 +249,38 @@ JSON only."""
                 headline = str(row.get("headline", "")).strip()
                 if segment and headline:
                     self._llm_headlines[segment] = headline
+
+        # The editor may remove repetition, but it may not erase an entire
+        # requested analytical lens. Restore the strongest original
+        # model-authored finding when every finding in a segment/category was
+        # marked drop. This changes selection only; it never writes prose.
+        def preserve_one(keys: list[tuple[str, int]]) -> None:
+            if keys and all(key in self._llm_dropped for key in keys):
+                strongest = min(keys, key=lambda key: source[key].materiality)
+                self._llm_dropped.discard(strongest)
+
+        for result in segment_results:
+            keys = [
+                (result.segment.value, index)
+                for index in range(len(result.key_findings))
+            ]
+            preserve_one(keys)
+
+        risk_result = next(
+            (r for r in segment_results if r.segment.value == "risks_catalysts"), None)
+        if risk_result is not None:
+            if ReportSection.RISKS in self.plan.sections:
+                preserve_one([
+                    (risk_result.segment.value, index)
+                    for index, finding in enumerate(risk_result.key_findings)
+                    if _tag_matches(finding.tags, "risk")
+                ])
+            if ReportSection.CATALYSTS in self.plan.sections:
+                preserve_one([
+                    (risk_result.segment.value, index)
+                    for index, finding in enumerate(risk_result.key_findings)
+                    if _tag_matches(finding.tags, "catalyst")
+                ])
 
     # -- LLM takeaway selection -------------------------------------------
     async def _build_takeaways(

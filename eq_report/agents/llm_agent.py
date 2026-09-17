@@ -436,15 +436,11 @@ def _validated_priority(raw: Any) -> str:
 
 
 class VerifiedSegmentAgent(SegmentAgent):
-    """LLM-backed segment agent with a deterministic fallback.
+    """LLM narrative agent whose output is checked by deterministic QA.
 
-    Used for every segment now that there is no deterministic/LLM toggle: the
-    generic :class:`LLMSegmentAgent` above is the primary path, and the
-    original deterministic rule-based agent for the segment (from
-    ``AGENT_REGISTRY``) is kept as the fallback used when the LLM is not
-    configured, or the call itself raises or returns something that cannot be
-    turned into a ``SegmentResult``. The fallback is recorded on the result's
-    metadata so it is visible in the run's QA trail, not silent.
+    Rule-based agents are retained as data-analysis utilities but are never
+    used to author substitute prose. If model writing fails, the segment fails
+    visibly instead of silently switching authors.
     """
 
     def __init__(
@@ -457,7 +453,6 @@ class VerifiedSegmentAgent(SegmentAgent):
         tracker: UsageTracker | None = None,
     ) -> None:
         self.segment = segment
-        self._deterministic = deterministic
         self._llm_enabled = bool(
             client is not None or (model_config is not None and model_config.enabled))
         self._llm = (
@@ -467,16 +462,12 @@ class VerifiedSegmentAgent(SegmentAgent):
 
     async def _analyse(self, context: AgentContext) -> SegmentResult:
         if self._llm is None:
-            result = await self._deterministic._analyse(context)
-            result.metadata["llm_agent_skipped"] = "no LLM model configured"
-            return result
+            raise RuntimeError("LLM writing is required but no model is configured")
         try:
             return await self._llm._analyse(context)
-        except Exception as exc:  # noqa: BLE001 - fall back to the deterministic agent
+        except Exception as exc:
             log_event(
-                logger, logging.WARNING, "LLM segment agent failed; using deterministic agent",
+                logger, logging.ERROR, "LLM segment agent failed",
                 segment=self.segment.value, error=f"{type(exc).__name__}: {exc}",
             )
-            result = await self._deterministic._analyse(context)
-            result.metadata["llm_agent_fallback_reason"] = f"{type(exc).__name__}: {exc}"
-            return result
+            raise RuntimeError(f"LLM writing failed: {type(exc).__name__}: {exc}") from exc

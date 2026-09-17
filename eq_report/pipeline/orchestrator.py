@@ -54,7 +54,6 @@ from ..rendering.technical_appendix import (
     merge_technical_appendix,
 )
 from ..synthesis.llm_synthesizer import LLMSynthesizer
-from ..synthesis.synthesizer import Synthesizer
 from .freshness_check import FreshnessResult, check_freshness
 from .run_tracker import RunTracker, new_run_id
 
@@ -106,6 +105,10 @@ async def generate_report(
     settings = settings or Settings.from_env()
     settings.ensure_dirs()
     configure_logging(settings.log_level, as_json=settings.log_json)
+
+    if not settings.model.enabled:
+        raise RuntimeError(
+            "LLM writing is required. Configure EQR_MODEL_API_KEY before generating a report.")
 
     report_run_id = new_run_id()
     tracker = RunTracker(report_run_id, request.to_dict())
@@ -250,20 +253,10 @@ async def generate_report(
 
         # 6. Synthesis ---------------------------------------------------
         with tracker.stage("synthesis"):
-            # The LLM synthesizer is the only path now that a model is
-            # configured; it falls back to the inherited deterministic
-            # Key Takeaways selection internally (see
-            # LLMSynthesizer._build_takeaways) whenever the LLM call itself
-            # fails or returns nothing usable, so Synthesizer only runs
-            # directly when no model is configured at all.
-            if settings.model.enabled:
-                draft = await LLMSynthesizer(
-                    report_run_id, plan, reader, analytics, settings.model,
-                    tracker=usage_tracker,
-                ).synthesize_async(segment_results)
-            else:
-                draft = Synthesizer(report_run_id, plan, reader, analytics).synthesize(
-                    segment_results)
+            draft = await LLMSynthesizer(
+                report_run_id, plan, reader, analytics, settings.model,
+                tracker=usage_tracker,
+            ).synthesize_async(segment_results)
             if freshness.checked:
                 draft = replace(draft, metadata={
                     **draft.metadata, "freshness_check": freshness.to_dict()})

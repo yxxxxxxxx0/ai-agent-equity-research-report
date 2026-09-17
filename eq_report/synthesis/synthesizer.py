@@ -23,6 +23,7 @@ come out the same length or in the same shape. Exhibits are built centrally by
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import replace
 
 from ..domain.analytics import AnalyticsBundle
@@ -43,7 +44,6 @@ from .exhibits import ExhibitBuilder
 from .key_data import build_key_data_panel
 from .terminology import (
     claim_fingerprint,
-    id_overlap,
     is_near_duplicate,
     normalise_terminology,
     soften_unsupported_causation,
@@ -78,14 +78,6 @@ _CAUSATION_ACCEPTABLE_CLAIM_TYPES = frozenset({
     ClaimType.MANAGEMENT_STATEMENT, ClaimType.CONFIRMED_FACT,
     ClaimType.CALCULATED_OBSERVATION,
 })
-
-#: A cross-section repeat is caught two independent ways: near-identical
-#: wording (the existing 0.72 Jaccard threshold in is_near_duplicate), or this
-#: high an overlap in the underlying evidence/analytics ids cited - the latter
-#: is what catches two agents stating the same fact in different words
-#: (including different number formatting), which the wording-only test alone
-#: misses.
-_CROSS_SECTION_ID_FLOOR = 0.6
 
 #: Which segment supplies each report section, and the section's printed
 #: title. Titles avoid investment-toned framing ("Risks", "Catalysts"), which
@@ -144,9 +136,9 @@ class Synthesizer:
         # it is rendered against its own (discarded) scope; suppressing a body
         # claim because the summary already made it would gut the detail
         # sections. Each entry pairs a statement's text fingerprint with the
-        # evidence/analytics ids it cited, so a later statement can be caught
-        # as a repeat either by wording or by citing the same underlying facts
-        # in different words - see _statements.
+        # evidence/analytics ids it cited. Duplicate suppression uses wording,
+        # not shared provenance: the same source can legitimately support a
+        # financial result, an operating driver, and a risk.
         self._seen_fingerprints: list[tuple[frozenset[str], frozenset[str]]] = []
         self._duplicates_removed = 0
         self._exhibits = ExhibitBuilder(reader, analytics, plan.peers).build()
@@ -348,9 +340,9 @@ class Synthesizer:
         """
         findings = result.key_findings
         if section is ReportSection.RISKS:
-            findings = tuple(f for f in findings if "risk" in f.tags)
+            findings = tuple(f for f in findings if _tag_matches(f.tags, "risk"))
         elif section is ReportSection.CATALYSTS:
-            findings = tuple(f for f in findings if "catalyst" in f.tags)
+            findings = tuple(f for f in findings if _tag_matches(f.tags, "catalyst"))
         return tuple(sorted(findings, key=lambda f: (f.materiality, _claim_rank(f.claim_type))))
 
     def _statements(
@@ -383,7 +375,6 @@ class Synthesizer:
             scope = self._seen_fingerprints if dedupe else local_seen
             if any(
                 is_near_duplicate(fingerprint, seen_text)
-                or (ids and seen_ids and id_overlap(ids, seen_ids) >= _CROSS_SECTION_ID_FLOOR)
                 for seen_text, seen_ids in scope
             ):
                 if dedupe:
@@ -495,6 +486,15 @@ class Synthesizer:
         ticker = f" ({self.plan.ticker})" if self.plan.ticker else ""
         objective = self.plan.request.objective.strip().title()
         return f"{self.plan.company}{ticker} - {objective}"
+
+
+def _tag_matches(tags: tuple[str, ...], label: str) -> bool:
+    """Match semantic labels inside model-authored multi-word tags."""
+    wanted = label.casefold()
+    return any(
+        wanted in re.findall(r"[a-z0-9]+", str(tag).casefold())
+        for tag in tags
+    )
 
 
 def _lead_first(sections: tuple[ReportSection, ...]) -> tuple[ReportSection, ...]:

@@ -1,12 +1,8 @@
 """Builds and runs the segment agents concurrently.
 
-Which agents run is decided by the research plan, not hard-coded here: a request
-that omits the valuation section never constructs the valuation agent. Every
-segment now runs as a :class:`~eq_report.agents.llm_agent.VerifiedSegmentAgent`:
-the generic LLM-backed agent is the primary path, and the segment's original
-deterministic rule-based implementation (below, in ``AGENT_REGISTRY``) is kept
-as the fallback used when no model is configured or the LLM call fails - see
-``VerifiedSegmentAgent`` for the fallback mechanics.
+Which agents run is decided by the research plan, not hard-coded here. Every
+segment is written by :class:`~eq_report.agents.llm_agent.VerifiedSegmentAgent`;
+deterministic code validates the resulting provenance and numbers.
 """
 
 from __future__ import annotations
@@ -35,10 +31,8 @@ from .what_matters_next import WhatMattersNextAgent
 
 logger = get_logger("agents.runner")
 
-#: The deterministic agent implementing each segment. No longer used directly
-#: as the primary path - each is now the verification/fallback core wrapped by
-#: VerifiedSegmentAgent - but kept exactly as before so that behaviour is
-#: unchanged when no model is configured.
+#: Segment-specific deterministic analysis helpers. They are passed for API
+#: compatibility but are not used to write fallback prose.
 AGENT_REGISTRY: dict[SegmentName, type[SegmentAgent]] = {
     SegmentName.COMPANY_SNAPSHOT: CompanySnapshotAgent,
     SegmentName.FINANCIAL_PERFORMANCE: FinancialPerformanceAgent,
