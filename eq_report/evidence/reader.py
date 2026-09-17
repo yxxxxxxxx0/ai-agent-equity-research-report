@@ -93,6 +93,14 @@ class EvidenceReader:
         """Historical closing prices, oldest first."""
         return self.series("price_history_point", "price_history")
 
+    def daily_highs(self) -> tuple[EvidenceItem, ...]:
+        """Daily high prices (one per trading day), oldest first."""
+        return self.series("daily_high", "daily_ohlc")
+
+    def daily_lows(self) -> tuple[EvidenceItem, ...]:
+        """Daily low prices (one per trading day), oldest first."""
+        return self.series("daily_low", "daily_ohlc")
+
     def value(self, metric: str, period_label: str | None = None) -> float | None:
         item = self.numeric(metric, period_label)
         return item.value if item else None

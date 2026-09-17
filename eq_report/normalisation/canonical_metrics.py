@@ -27,6 +27,11 @@ SHARES_OUTSTANDING = "shares_outstanding"
 PRICE_52W_HIGH = "price_52w_high"
 PRICE_52W_LOW = "price_52w_low"
 PRICE_HISTORY_POINT = "price_history_point"
+# Raw daily bar high/low (one per trading day) - distinct from the 52-week
+# aggregate above, which the Analytics Engine derives from a rolling window
+# over these (see analytics/calculations.py::price_52w_range).
+DAILY_HIGH = "daily_high"
+DAILY_LOW = "daily_low"
 FORWARD_PE = "forward_pe"
 TRAILING_PE = "trailing_pe"
 EV_TO_SALES = "ev_to_sales"
@@ -106,6 +111,14 @@ _register(SHARES_OUTSTANDING, "diluted_shares_outstanding", "sharesOutstanding")
 _register(PRICE_52W_HIGH, "fifty_two_week_high", "52_week_high")
 _register(PRICE_52W_LOW, "fifty_two_week_low", "52_week_low")
 _register(PRICE_HISTORY_POINT, "historical_close", "price_history")
+# MegadataAPI's daily OHLCV feed (/api/bbg/ohlcv/data) uses Bloomberg field
+# codes rather than the aliases above; PX_LAST/PX_VOLUME are just another
+# name for the same share price / volume, while PX_HIGH/PX_LOW are new
+# canonical metrics (a day's high/low, not the 52-week aggregate).
+_register(SHARE_PRICE, "px_last")
+_register(VOLUME, "px_volume")
+_register(DAILY_HIGH, "px_high")
+_register(DAILY_LOW, "px_low")
 _register(FORWARD_PE, "forward_p_e", "pe_forward", "forwardPE")
 _register(TRAILING_PE, "pe_ratio", "trailing_p_e", "trailingPE", "pe")
 _register(EV_TO_SALES, "ev_sales", "ev_revenue", "enterprise_value_to_revenue")
@@ -189,12 +202,14 @@ COUNT_METRICS: frozenset[str] = frozenset({
 PER_SHARE_METRICS: frozenset[str] = frozenset({
     EPS_DILUTED, CONSENSUS_EPS, FORWARD_EPS_ESTIMATE, SHARE_PRICE, PREVIOUS_CLOSE,
     PRICE_TARGET, PRICE_52W_HIGH, PRICE_52W_LOW, PRICE_HISTORY_POINT,
+    DAILY_HIGH, DAILY_LOW,
 })
 
 #: Which evidence category a canonical metric belongs to.
 _CATEGORY_BY_METRIC: dict[str, EvidenceCategory] = {}
 for _m in (SHARE_PRICE, PREVIOUS_CLOSE, MARKET_CAP, ENTERPRISE_VALUE, VOLUME, AVG_VOLUME_30D,
-           SHARES_OUTSTANDING, PRICE_52W_HIGH, PRICE_52W_LOW, PRICE_HISTORY_POINT, FORWARD_PE,
+           SHARES_OUTSTANDING, PRICE_52W_HIGH, PRICE_52W_LOW, PRICE_HISTORY_POINT,
+           DAILY_HIGH, DAILY_LOW, FORWARD_PE,
            TRAILING_PE, EV_TO_SALES, EV_TO_EBITDA, PRICE_TO_SALES,
            REVENUE_GROWTH_YOY_REPORTED):
     _CATEGORY_BY_METRIC[_m] = EvidenceCategory.MARKET
@@ -262,6 +277,8 @@ _DISPLAY_LABELS: dict[str, str] = {
     SHARES_OUTSTANDING: "Diluted shares outstanding",
     PRICE_52W_HIGH: "52-week high",
     PRICE_52W_LOW: "52-week low",
+    DAILY_HIGH: "Daily high",
+    DAILY_LOW: "Daily low",
     FORWARD_PE: "Forward P/E",
     TRAILING_PE: "Trailing P/E",
     EV_TO_SALES: "EV/Sales",

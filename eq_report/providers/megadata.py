@@ -211,25 +211,58 @@ def _flatten_observations(
         s.strip() for s in request.params.get("symbols", "").split(",") if s.strip())
     known_tickers = frozenset(t.upper() for t in known_tickers if t)
 
-    def walk(value: Any, path: tuple[str, ...]) -> None:
+    def walk(value: Any, path: tuple[str, ...], record_date: str | None = None) -> None:
         if isinstance(value, dict):
+            # A day-indexed record (e.g. one entry of a daily OHLCV list) carries
+            # its own date as a sibling field rather than in the JSON path. Pull
+            # it out once per record and thread it down, instead of leaving
+            # every field in that record dateless (the previous behaviour: the
+            # date-in-path heuristic below only ever finds a date that was
+            # already a path *key*, never a sibling value like this).
+            own_date = next(
+                (str(value[k])[:10] for k in ("date", "datetime", "timestamp")
+                 if isinstance(value.get(k), str) and len(str(value[k])) >= 10
+                 and str(value[k])[4:5] == "-"),
+                record_date,
+            )
             for key, child in value.items():
-                walk(child, (*path, str(key)))
+                if key in ("date", "datetime", "timestamp"):
+                    continue  # metadata for the record, not a metric in its own right
+                walk(child, (*path, str(key)), own_date)
         elif isinstance(value, list):
             for index, child in enumerate(value):
-                walk(child, (*path, str(index)))
+                walk(child, (*path, str(index)), record_date)
         elif value is not None and not isinstance(value, bool):
-            metric = ".".join(path[-3:]) or request.request_id
-            date = next((part for part in reversed(path) if len(part) >= 10 and part[4:5] == "-"), None)
+            # A ticker or a bare list index carries no metric identity of its
+            # own - the ticker is already tracked separately below, and an
+            # index is positional, not a name. Left in, either one turns a
+            # single field (e.g. Bloomberg's PX_HIGH) into a distinct
+            # "metric" per ticker/day, which can never match a canonical
+            # alias and floods the Evidence Store with one-off names instead
+            # of one real metric with many dated observations.
+            name_parts = [p for p in path if p.upper() not in known_tickers and not p.isdigit()]
+            metric = ".".join(name_parts[-3:]) or request.request_id
+            date = record_date or next(
+                (part for part in reversed(path) if len(part) >= 10 and part[4:5] == "-"), None)
             path_ticker = next(
                 (part.upper() for part in path if str(part).upper() in known_tickers),
                 plan.ticker)
+            metadata: dict[str, Any] = {
+                "request_id": request.request_id, "purpose": request.purpose,
+                "json_path": ".".join(path),
+            }
+            if record_date:
+                # This leaf came from one dated record in a list (a day of an
+                # OHLCV-style series) rather than a one-off flat field. Tag it
+                # so EvidenceReader.series()/daily_highs()/daily_lows() can
+                # pull the whole dated history for a metric, the same way
+                # price_history() already does for "price_history".
+                metadata["series"] = "daily_ohlc"
             out.append(RawObservation(
                 metric=metric, value=value, source=source, as_of=date,
                 company=plan.company if path_ticker == plan.ticker else str(path_ticker),
                 ticker=path_ticker, confidence=Confidence.HIGH,
-                metadata={"request_id": request.request_id, "purpose": request.purpose,
-                          "json_path": ".".join(path)},
+                metadata=metadata,
             ))
 
     walk(payload, ())

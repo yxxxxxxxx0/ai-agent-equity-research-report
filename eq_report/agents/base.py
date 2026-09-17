@@ -175,6 +175,25 @@ class SegmentAgent(abc.ABC):
         )
 
     @staticmethod
+    def metric_highlight_from_analytic(
+        result: AnalyticsResult | None, *, label: str | None = None,
+    ) -> MetricHighlight | None:
+        """A display-ready table row from a calculated analytic instead of a
+        directly-reported evidence item - e.g. a 52-week high/low derived
+        from the daily OHLC series when the provider never sends that
+        aggregate as a direct field. Used as the fallback when
+        ``metric_highlight`` finds no evidence for the same metric."""
+        if result is None or result.value is None:
+            return None
+        return MetricHighlight(
+            label=label or result.label,
+            value_text=format_analytic(result),
+            period=result.period,
+            evidence_ids=(),
+            analytics_ids=(result.analytics_id,),
+        )
+
+    @staticmethod
     def gap(description: str, *, metric: str | None = None, impact: str = "",
             segment: SegmentName | None = None, priority: str = "medium") -> DataGap:
         return DataGap(description=description, missing_metric=metric, impact=impact,

@@ -19,8 +19,13 @@ class CompanySnapshotAgent(SegmentAgent):
         market_cap = reader.numeric("market_cap")
         enterprise_value = reader.numeric("enterprise_value")
         revenue = reader.numeric("revenue", context.latest_period)
+        # A direct provider field, if MegaAPI ever sends one, wins; otherwise
+        # fall back to the Analytics Engine's rolling max/min over the daily
+        # OHLC series (see analytics/engine.py::_price_52w_range).
         high_52w = reader.numeric("price_52w_high")
         low_52w = reader.numeric("price_52w_low")
+        high_52w_analytic = analytics.first("price_52w_high") if high_52w is None else None
+        low_52w_analytic = analytics.first("price_52w_low") if low_52w is None else None
 
         return_1m = analytics.first("price_return_1m")
         return_3m = analytics.first("price_return_3m")
@@ -64,8 +69,10 @@ class CompanySnapshotAgent(SegmentAgent):
             self.metric_highlight(market_cap, label="Market capitalisation"),
             self.metric_highlight(enterprise_value, label="Enterprise value"),
             self.metric_highlight(revenue, label="Revenue (latest reported quarter)"),
-            self.metric_highlight(high_52w, label="52-week high"),
-            self.metric_highlight(low_52w, label="52-week low"),
+            self.metric_highlight(high_52w, label="52-week high")
+            or self.metric_highlight_from_analytic(high_52w_analytic, label="52-week high"),
+            self.metric_highlight(low_52w, label="52-week low")
+            or self.metric_highlight_from_analytic(low_52w_analytic, label="52-week low"),
         ])
 
         if revenue is None:

@@ -49,6 +49,7 @@ from ..normalisation.dates import (
 from ..normalisation.units import (
     UNIT_COUNT,
     UNIT_MULTIPLE,
+    UNIT_PER_SHARE,
     UNIT_PERCENT,
     UNIT_PERCENTAGE_POINTS,
 )
@@ -152,6 +153,7 @@ class AnalyticsEngine:
 
         # Price-based analytics.
         self._price_returns(wanted)
+        self._price_52w_range()
 
         # Growth and margin analytics for the latest reported period.
         if latest:
@@ -223,6 +225,47 @@ class AnalyticsEngine:
                     "target_date": target_date.isoformat(),
                     "baseline_drift_days": drift_days,
                 },
+            )
+
+    def _price_52w_range(self) -> None:
+        """52-week high/low, computed from the daily OHLC series.
+
+        MegadataAPI's daily feed carries a high and a low for every trading
+        day (Bloomberg's PX_HIGH/PX_LOW), not a ready-made 52-week aggregate -
+        so this is a calculated observation over the trailing window actually
+        held in the Evidence Store, not a value asserted by the provider.
+        Company Snapshot and the key-data panel (agents/company_snapshot.py,
+        synthesis/key_data.py) already read "price_52w_high"/"price_52w_low"
+        from evidence first and fall back to this analytic when the provider
+        has not sent it as a direct field.
+        """
+        highs, lows = self.reader.daily_highs(), self.reader.daily_lows()
+        if not highs and not lows:
+            self._skips.append(
+                "No daily high/low series available; 52-week range skipped.")
+            return
+        # Cite the specific day the extreme occurred, not all ~250 daily rows
+        # behind it - the window size and date range go in metadata for
+        # transparency, and the formula/inputs still record the calculation.
+        if highs:
+            peak = max(highs, key=lambda i: i.value if i.value is not None else float("-inf"))
+            self._record(
+                metric="price_52w_high", label="52-week high",
+                fn=lambda: calc.rolling_max([i.value for i in highs]),
+                unit=UNIT_PER_SHARE, formula=calc.F_ROLLING_MAX,
+                evidence=(peak,), inputs={"window_days": len(highs)},
+                metadata={"window_start": (highs[0].as_of.isoformat() if highs[0].as_of else None),
+                          "window_end": (highs[-1].as_of.isoformat() if highs[-1].as_of else None)},
+            )
+        if lows:
+            trough = min(lows, key=lambda i: i.value if i.value is not None else float("inf"))
+            self._record(
+                metric="price_52w_low", label="52-week low",
+                fn=lambda: calc.rolling_min([i.value for i in lows]),
+                unit=UNIT_PER_SHARE, formula=calc.F_ROLLING_MIN,
+                evidence=(trough,), inputs={"window_days": len(lows)},
+                metadata={"window_start": (lows[0].as_of.isoformat() if lows[0].as_of else None),
+                          "window_end": (lows[-1].as_of.isoformat() if lows[-1].as_of else None)},
             )
 
     def _growth(

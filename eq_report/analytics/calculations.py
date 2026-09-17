@@ -25,6 +25,8 @@ F_CONTRIBUTION = "part / total * 100"
 F_PREMIUM = "(value - benchmark) / abs(benchmark) * 100"
 F_MEAN = "sum(values) / count(values)"
 F_REVISION_NET = "(up - down) / (up + down) * 100"
+F_ROLLING_MAX = "max(values)"
+F_ROLLING_MIN = "min(values)"
 
 
 def _require_number(value: object, name: str) -> float:
@@ -102,6 +104,22 @@ def mean(values: Sequence[object]) -> float:
 def price_return_pct(current_price: object, past_price: object) -> float:
     """Simple price return between two closes, in percent units."""
     return pct_change(current_price, past_price)
+
+
+def rolling_max(values: Sequence[object]) -> float:
+    """Highest value in a window; raises on an empty window."""
+    numbers = [_require_number(v, "value") for v in values]
+    if not numbers:
+        raise AnalyticsError("cannot take the max of an empty sequence")
+    return max(numbers)
+
+
+def rolling_min(values: Sequence[object]) -> float:
+    """Lowest value in a window; raises on an empty window."""
+    numbers = [_require_number(v, "value") for v in values]
+    if not numbers:
+        raise AnalyticsError("cannot take the min of an empty sequence")
+    return min(numbers)
 
 
 def net_revision_pct(up: object, down: object) -> float:
