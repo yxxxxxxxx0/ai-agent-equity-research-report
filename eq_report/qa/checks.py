@@ -478,6 +478,14 @@ def check_metric_agreement(context: QAContext) -> list[QAFinding]:
     for item in context.reader.query(ticker=context.draft.ticker, has_value=True):
         if not item.metric or item.metadata.get("series"):
             continue
+        # The QA auditor (qa/auditor.py) tags a candidate this way only after
+        # a live, dated, real source explicitly contradicted it - not merely
+        # "differently sourced" (reconcile() already leaves those alone).
+        # Once adjudicated, its stale value must stop re-triggering this
+        # check on every re-run, or "solved, then re-checked" could never
+        # actually turn green even after a genuine correction.
+        if item.metadata.get("superseded_by_verification"):
+            continue
         discriminator = str(
             item.metadata.get("segment_name") or item.metadata.get("kpi_name") or "")
         key = (item.metric, item.period_label or (
