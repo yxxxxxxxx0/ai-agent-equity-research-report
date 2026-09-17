@@ -254,6 +254,29 @@ class EvidenceStore:
                   submitted=len(rows), written=written)
         return written
 
+    def replace(self, items: Iterable[EvidenceItem]) -> int:
+        """Persist reviewed evidence, replacing rows with the same id.
+
+        Ingestion always uses :meth:`save`; this is solely for a later review
+        stage which adds auditable validation metadata to an existing row.
+        """
+        rows = [self._to_row(item) for item in items]
+        if not rows:
+            return 0
+        columns = list(rows[0].keys())
+        sql = (
+            f"INSERT OR REPLACE INTO evidence ({', '.join(columns)}) "
+            f"VALUES ({', '.join(':' + c for c in columns)})"
+        )
+        try:
+            self._conn.executemany(sql, rows)
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            self._conn.rollback()
+            raise EvidenceStoreError(f"evidence replacement failed: {exc}") from exc
+        log_event(logger, logging.INFO, "reviewed evidence replaced", count=len(rows))
+        return len(rows)
+
     def save_analytics(self, results: Iterable[AnalyticsResult]) -> int:
         rows = [
             {

@@ -46,6 +46,21 @@ _NUMBER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Dates identify a source or a reporting period; they are not numerical facts
+# that must themselves have a canonical numeric evidence row.
+_DATE_OR_PERIOD_RE = re.compile(
+    r"\b(?:FY\s*)?\d{4}\s*Q[1-4]\b|\bQ[1-4]\s*(?:FY\s*)?\d{4}\b"
+    r"|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+    r"\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?\b|\b(?:19|20)\d{2}\b",
+    re.IGNORECASE,
+)
+
+
+def has_asserted_numeric_fact(text: str) -> bool:
+    """Return whether text has a number other than a date or fiscal label."""
+    return bool(_NUMBER_RE.search(_DATE_OR_PERIOD_RE.sub("", text)))
+
 
 
 # ---------------------------------------------------------------------------
@@ -139,10 +154,9 @@ def check_claims_are_supported(context: QAContext) -> list[QAFinding]:
 def check_numeric_claims_use_canonical_evidence(context: QAContext) -> list[QAFinding]:
     """P0: document text is context, not a structured numerical fact."""
     findings: list[QAFinding] = []
-    numeric = re.compile(r"(?:[$€£]\s*)?\d+(?:[,.]\d+)*(?:\s*(?:%|x|million|billion|bn|m))?", re.I)
     for section in context.draft.sections:
         for statement in section.statements:
-            if not numeric.search(statement.text) or statement.analytics_ids:
+            if not has_asserted_numeric_fact(statement.text) or statement.analytics_ids:
                 continue
             cited = [context.reader.get(eid) for eid in statement.evidence_ids]
             cited = [item for item in cited if item is not None]

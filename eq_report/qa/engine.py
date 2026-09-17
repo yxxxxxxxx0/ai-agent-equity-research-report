@@ -31,7 +31,7 @@ from typing import Any
 
 from ..config import ModelConfig
 from ..domain.analytics import AnalyticsBundle
-from ..domain.enums import Severity
+from ..domain.enums import EvidenceStatus, Severity
 from ..domain.plan import ResearchPlan
 from ..domain.qa import QAFinding, QAResult
 from ..domain.report import ReportDraft
@@ -200,22 +200,30 @@ class QAEngine:
         # by finding a real, dated, source-linked answer, the same standard
         # pipeline.gap_research holds live web search to. Opt-in: a real extra
         # cost per conflict (see Settings.verify_metric_conflicts).
+        verified_evidence_ids: set[str] = set()
         if self._verify_conflicts and same_fact_positions and self._model_config is not None \
                 and self._model_config.enabled:
-            downgraded.update(await self._verify_conflicts_online(
-                conflicts, groups, same_fact_positions, reader))
+            online_downgrades, verified_evidence_ids = await self._verify_conflicts_online(
+                conflicts, groups, same_fact_positions, reader)
+            downgraded.update(online_downgrades)
 
+        resolved_numeric_findings = {
+            id(finding) for finding in findings
+            if finding.check == "evidence.numeric_claim_not_canonical"
+            and verified_evidence_ids.intersection(
+                map(str, finding.details.get("evidence_ids", [])))
+        }
         return [
             replace(finding, severity=Severity.WARNING,
                     message=f"{finding.message} {downgraded[id(finding)]}")
             if id(finding) in downgraded else finding
-            for finding in findings
+            for finding in findings if id(finding) not in resolved_numeric_findings
         ]
 
     async def _verify_conflicts_online(
         self, conflicts: list[QAFinding], groups: list[dict[str, Any]],
         same_fact_positions: list[int], reader: EvidenceReader,
-    ) -> dict[int, str]:
+    ) -> tuple[dict[int, str], set[str]]:
         """Best-effort live verification of a genuine same-fact disagreement.
 
         Only unblocks a conflict by matching one candidate to an actual,
@@ -233,6 +241,7 @@ class QAEngine:
             "published_date": "YYYY-MM-DD if stated on the page, else null",
         }
         downgraded: dict[int, str] = {}
+        verified_evidence_ids: set[str] = set()
         for position in same_fact_positions[:_MAX_CONFLICT_VERIFICATIONS]:
             finding = conflicts[position]
             group = groups[position]
@@ -243,8 +252,8 @@ class QAEngine:
             prompt = (
                 f"Company: {reader.company} ({reader.ticker or 'ticker unknown'})\n"
                 f"Metric: {group['metric']}\n"
-                f"Data-vendor sources disagree; the disputed candidate values are: {candidates}\n"
-                "Find the real, current value of this metric from an actual, dated source, and "
+                f"Candidate observations (the source must match their period/as-of date): {group['rows']}\n"
+                "Find the real value for that same period/as-of date from an actual, dated source, and "
                 "report exactly what that source states.\n"
                 f"Return this JSON shape: {schema}"
             )
@@ -263,7 +272,7 @@ class QAEngine:
             source_name = str(payload.get("source_name", "")).strip()
             # A citation with no real URL is indistinguishable from an invented
             # one - the same rule pipeline.gap_research applies.
-            if not source_name or not (url.startswith("http://") or url.startswith("https://")):
+            if not source_name or not url.startswith(("http://", "https://")):
                 continue
             try:
                 matched_value = float(payload.get("matched_value"))
@@ -273,12 +282,28 @@ class QAEngine:
             if abs(winner - matched_value) / max(abs(matched_value), 1e-9) > 0.02:
                 continue  # the verified source doesn't actually match either candidate
             date_bit = f", dated {payload['published_date']}" if payload.get("published_date") else ""
+            winner_row = next(
+                (row for row in group["rows"] if row.get("value") == winner), None)
+            winner_id = str(winner_row.get("evidence_id")) if winner_row else ""
+            item = reader.get(winner_id)
+            if item is None:
+                continue
+            reader.store.replace([replace(
+                item, status=EvidenceStatus.VALIDATED, is_canonical=True,
+                validation_messages=item.validation_messages + ("web-verified canonical selection",),
+                metadata={**item.metadata, "web_verification": {
+                    "source_name": source_name, "source_url": url,
+                    "published_date": payload.get("published_date"),
+                    "matched_value": matched_value,
+                }},
+            )])
+            verified_evidence_ids.add(winner_id)
             downgraded[id(finding)] = (
                 f"Web verification: {source_name}{date_bit} reports {matched_value}, "
                 f"matching the {winner} candidate; the other candidate(s) were not "
                 f"corroborated by any dated source. <{url}>"
             )
-        return downgraded
+        return downgraded, verified_evidence_ids
 
     # -- LLM-backed overlay ------------------------------------------------
     async def _llm_review(

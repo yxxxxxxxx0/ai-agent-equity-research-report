@@ -1,18 +1,32 @@
 import datetime as dt
 from dataclasses import replace
-
-import pytest
 from types import SimpleNamespace
 
-from eq_report.domain.enums import Confidence, EvidenceCategory, EvidenceStatus, SourceType
+import pytest
+
+from eq_report.domain.enums import (
+    Confidence,
+    EvidenceCategory,
+    EvidenceStatus,
+    SourceType,
+)
 from eq_report.domain.evidence import EvidenceItem, FiscalPeriod
 from eq_report.evidence.reader import EvidenceReader
 from eq_report.evidence.store import EvidenceStore
-from eq_report.normalisation.reconciliation import reconcile
-from eq_report.normalisation.units import parse_number, UNIT_PERCENT, UNIT_PERCENTAGE_POINTS
-from eq_report.normalisation.validation import detect_outlier, guidance_midpoint, validate_ratio
 from eq_report.normalisation.normalizer import Normalizer
+from eq_report.normalisation.reconciliation import reconcile
+from eq_report.normalisation.units import (
+    UNIT_PERCENT,
+    UNIT_PERCENTAGE_POINTS,
+    parse_number,
+)
+from eq_report.normalisation.validation import (
+    detect_outlier,
+    guidance_midpoint,
+    validate_ratio,
+)
 from eq_report.providers.megadata import _extract_passages
+from eq_report.qa.checks import has_asserted_numeric_fact
 
 
 def item(eid, value, *, metric="revenue", basis=None, source=SourceType.COMPANY_FILING,
@@ -116,6 +130,12 @@ def test_derived_dependency_ids_are_preserved_in_metadata():
                   metadata={"dependencies": ["low", "high", "prior"]})
     result = reconcile([row])[0]
     assert result.metadata["dependencies"] == ["low", "high", "prior"]
+
+
+def test_dates_and_fiscal_labels_are_not_numeric_claims():
+    assert not has_asserted_numeric_fact(
+        "The FY2026 Q2 filing dated August 1, 2026 discusses demand.")
+    assert has_asserted_numeric_fact("Revenue was $28.2 billion in FY2026 Q2.")
 
 
 def test_retrieved_document_number_cannot_enter_numeric_reader(tmp_path):
