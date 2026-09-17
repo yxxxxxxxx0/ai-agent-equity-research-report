@@ -25,8 +25,6 @@ from .base import DocumentsProvider, FundamentalsProvider, MarketDataProvider
 
 class _MegadataMixin:
     name = "megadata"
-    is_mock = False
-
     def is_available(self) -> bool:
         return self.settings.credentials.has_megadata()
 

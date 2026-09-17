@@ -135,6 +135,8 @@ def test_derived_dependency_ids_are_preserved_in_metadata():
 def test_dates_and_fiscal_labels_are_not_numeric_claims():
     assert not has_asserted_numeric_fact(
         "The FY2026 Q2 filing dated August 1, 2026 discusses demand.")
+    assert not has_asserted_numeric_fact(
+        "The July 22 call and August 1 filing make Q3 margin the nearest measure.")
     assert has_asserted_numeric_fact("Revenue was $28.2 billion in FY2026 Q2.")
 
 

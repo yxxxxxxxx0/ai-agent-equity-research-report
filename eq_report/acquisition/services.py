@@ -50,10 +50,6 @@ class AcquisitionResult:
         return ProviderStatus.FAILED
 
     @property
-    def used_mock_data(self) -> bool:
-        return any(r.is_mock and r.item_count for r in self.provider_results)
-
-    @property
     def item_count(self) -> int:
         return len(self.observations) + len(self.passages)
 
@@ -62,34 +58,18 @@ class AcquisitionResult:
             "branch": self.branch,
             "status": self.status.value,
             "item_count": self.item_count,
-            "used_mock_data": self.used_mock_data,
             "providers": [r.to_dict() for r in self.provider_results],
             "errors": [e.to_dict() for e in self.errors],
         }
 
 
 class AcquisitionService:
-    """Base class: runs a branch's providers concurrently and merges the output.
-
-    ``fallback`` is a mock provider tried when the *configured* real
-    provider(s) ran without raising but still returned zero items (e.g. an
-    unreachable host that the provider itself catches and reports as an
-    error rather than an exception - see ``MegadataMarketProvider``). This is
-    distinct from - and in addition to - ``ProviderRegistry`` already
-    choosing a mock provider outright when no real provider is configured at
-    all: this branch keeps "use mock data when the API can't be reached"
-    true at runtime, not only at startup.
-    """
+    """Runs one branch's MegadataAPI provider and records any failure."""
 
     branch = "unknown"
 
-    def __init__(
-        self, providers: Sequence[DataProvider], *,
-        fallback: DataProvider | None = None, allow_mock: bool = True,
-    ) -> None:
+    def __init__(self, providers: Sequence[DataProvider]) -> None:
         self.providers = tuple(providers)
-        self.fallback = fallback
-        self.allow_mock = allow_mock
 
     async def fetch(self, plan: ResearchPlan) -> AcquisitionResult:
         if not self.providers:
@@ -122,7 +102,6 @@ class AcquisitionService:
                     provider_name=provider.name, branch=self.branch,
                     status=ProviderStatus.FAILED,
                     errors=(f"{type(result).__name__}: {result}",),
-                    is_mock=provider.is_mock,
                 ))
                 continue
 
@@ -147,43 +126,11 @@ class AcquisitionService:
             errors=tuple(errors),
         )
 
-        used_real_provider = any(not p.is_mock for p in self.providers)
-        if acquisition.item_count == 0 and used_real_provider and self.fallback is not None:
-            if not self.allow_mock:
-                errors.append(PipelineError(
-                    stage=f"acquisition.{self.branch}",
-                    kind="NoDataAndMockDisabled",
-                    message=(
-                        f"The configured {self.branch} provider(s) returned no data "
-                        "and mock providers are disabled (EQR_ALLOW_MOCK_PROVIDERS=false)."
-                    ),
-                ))
-                acquisition = AcquisitionResult(
-                    branch=self.branch, provider_results=tuple(provider_results),
-                    errors=tuple(errors),
-                )
-            else:
-                log_event(
-                    logger, logging.WARNING,
-                    "real provider returned no data; falling back to mock provider",
-                    branch=self.branch,
-                    providers=[p.name for p in self.providers],
-                )
-                mock_result = await self.fallback.fetch(plan)
-                acquisition = AcquisitionResult(
-                    branch=self.branch,
-                    observations=tuple(mock_result.observations),
-                    passages=tuple(mock_result.passages),
-                    provider_results=(*provider_results, mock_result),
-                    errors=tuple(errors),
-                )
-
         log_event(
             logger, logging.INFO, "acquisition branch complete",
             branch=self.branch, status=acquisition.status.value,
             observations=len(acquisition.observations), passages=len(acquisition.passages),
             providers=[r.provider_name for r in acquisition.provider_results],
-            used_mock_data=acquisition.used_mock_data,
         )
         return acquisition
 
@@ -213,10 +160,6 @@ class AcquisitionBundle:
         return (self.market_data, self.fundamentals, self.documents)
 
     @property
-    def used_mock_data(self) -> bool:
-        return any(b.used_mock_data for b in self.branches)
-
-    @property
     def errors(self) -> tuple[PipelineError, ...]:
         out: list[PipelineError] = []
         for branch in self.branches:
@@ -232,17 +175,10 @@ def build_services(
 ) -> tuple[MarketDataService, FundamentalsService, DocumentsService]:
     """Wire the three branch services from configuration."""
     registry = ProviderRegistry(settings, tracker=tracker)
-    allow_mock = settings.allow_mock_providers
     return (
-        MarketDataService(
-            registry.market_data_providers(),
-            fallback=registry.market_data_fallback(), allow_mock=allow_mock),
-        FundamentalsService(
-            registry.fundamentals_providers(),
-            fallback=registry.fundamentals_fallback(), allow_mock=allow_mock),
-        DocumentsService(
-            registry.documents_providers(),
-            fallback=registry.documents_fallback(), allow_mock=allow_mock),
+        MarketDataService(registry.market_data_providers()),
+        FundamentalsService(registry.fundamentals_providers()),
+        DocumentsService(registry.documents_providers()),
     )
 
 

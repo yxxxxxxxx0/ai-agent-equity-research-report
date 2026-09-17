@@ -73,8 +73,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"report JSON : {result.report_json_path}")
     if result.pdf_path:
         print(f"PDF         : {result.pdf_path}")
-    if result.annotated_pdf_path:
-        print(f"annotated   : {result.annotated_pdf_path}")
     if result.compact_pdf_path:
         print(f"compact PDF : {result.compact_pdf_path}")
     if result.run_manifest_path:

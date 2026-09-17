@@ -19,7 +19,13 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from ..domain.analytics import AnalyticsResult
-from ..domain.enums import Confidence, EvidenceCategory, EvidenceStatus, FactType, SourceType
+from ..domain.enums import (
+    Confidence,
+    EvidenceCategory,
+    EvidenceStatus,
+    FactType,
+    SourceType,
+)
 from ..domain.evidence import EvidenceItem, FiscalPeriod
 from ..errors import EvidenceStoreError
 from ..logging_setup import get_logger, log_event
@@ -68,7 +74,6 @@ CREATE TABLE IF NOT EXISTS evidence (
     confidence      TEXT NOT NULL,
     raw_metric      TEXT,
     raw_value       TEXT,
-    is_mock         INTEGER NOT NULL DEFAULT 0,
     metadata        TEXT NOT NULL DEFAULT '{}'
 );
 
@@ -400,8 +405,8 @@ class EvidenceStore:
     def source_summary(self, report_run_id: str) -> list[dict[str, Any]]:
         """Per-source evidence counts, used in the run manifest."""
         rows = self._conn.execute(
-            "SELECT source_name, source_type, is_mock, COUNT(*) AS n FROM evidence "
-            "WHERE report_run_id = ? GROUP BY source_name, source_type, is_mock "
+            "SELECT source_name, source_type, COUNT(*) AS n FROM evidence "
+            "WHERE report_run_id = ? GROUP BY source_name, source_type "
             "ORDER BY n DESC",
             (report_run_id,),
         ).fetchall()
@@ -409,7 +414,6 @@ class EvidenceStore:
             {
                 "source_name": row["source_name"],
                 "source_type": row["source_type"],
-                "is_mock": bool(row["is_mock"]),
                 "evidence_count": int(row["n"]),
             }
             for row in rows
@@ -462,7 +466,6 @@ class EvidenceStore:
             "confidence": item.confidence.value,
             "raw_metric": item.raw_metric,
             "raw_value": None if item.raw_value is None else str(item.raw_value),
-            "is_mock": int(item.is_mock),
             "metadata": json.dumps(item.metadata, default=str),
         }
 
@@ -520,7 +523,6 @@ class EvidenceStore:
             confidence=Confidence(row["confidence"]),
             raw_metric=row["raw_metric"],
             raw_value=row["raw_value"],
-            is_mock=bool(row["is_mock"]),
             metadata=json.loads(row["metadata"] or "{}"),
         )
 

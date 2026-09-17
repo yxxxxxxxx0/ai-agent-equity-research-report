@@ -93,7 +93,6 @@ class EvidenceItem:
     confidence: Confidence = Confidence.UNKNOWN
     raw_metric: str | None = None        # provider's original metric name
     raw_value: Any = None                # provider's original value
-    is_mock: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -148,7 +147,6 @@ class EvidenceItem:
             "confidence": self.confidence.value,
             "raw_metric": self.raw_metric,
             "raw_value": self.raw_value,
-            "is_mock": self.is_mock,
             "metadata": dict(self.metadata),
         }
 

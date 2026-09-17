@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..domain.enums import ClaimType, Confidence, ReportSection, SegmentName, Severity
+from ..domain.enums import ClaimType, Confidence, ReportSection, Severity
 from ..domain.qa import QAFinding, QAResult
 from ..domain.report import (
     ChartSpec,
@@ -21,17 +21,6 @@ from ..domain.report import (
     ReportSectionDraft,
     Statement,
 )
-from ..domain.segment import DataGap
-
-
-def _gap(row: dict[str, Any]) -> DataGap:
-    segment = row.get("segment")
-    return DataGap(
-        description=str(row.get("description", "")),
-        missing_metric=row.get("missing_metric"), impact=str(row.get("impact", "")),
-        segment=SegmentName(segment) if segment else None,
-        priority=str(row.get("priority", "medium")),
-    )
 
 
 def load_report_json(path: Path | str) -> tuple[ReportDraft, QAResult]:
@@ -61,7 +50,6 @@ def load_report_json(path: Path | str) -> tuple[ReportDraft, QAResult]:
             values=tuple(chart.get("values", [])), unit=chart.get("unit", ""),
             evidence_ids=tuple(chart.get("evidence_ids", [])),
         ) for chart in row.get("charts", [])),
-        data_gaps=tuple(_gap(item) for item in row.get("data_gaps", [])),
     ) for row in payload.get("sections", []))
     panel_row = payload.get("key_data")
     panel = None if not panel_row else KeyDataPanel(
@@ -76,8 +64,6 @@ def load_report_json(path: Path | str) -> tuple[ReportDraft, QAResult]:
         ticker=payload.get("ticker"), report_date=dt.date.fromisoformat(payload["report_date"]),
         objective=payload.get("objective", ""), title=payload["title"], sections=sections,
         citations=tuple(Citation(**row) for row in payload.get("citations", [])),
-        data_gaps=tuple(_gap(row) for row in payload.get("data_gaps", [])),
-        contains_mock_data=bool(payload.get("contains_mock_data", False)),
         key_data=panel, metadata=dict(payload.get("metadata", {})),
     )
     qa_row = payload.get("qa", {})

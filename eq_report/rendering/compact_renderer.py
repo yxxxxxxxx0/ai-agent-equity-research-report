@@ -12,15 +12,14 @@ from pathlib import Path
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
-from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.lib.utils import simpleSplit
+from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen.canvas import Canvas
 
-from ..domain.report import MetricTable, ReportDraft
 from ..config import ProviderCredentials, Settings
+from ..domain.report import MetricTable, ReportDraft
 from .json_loader import load_report_json
-from .technical_appendix import append_technical_appendix
-
+from .technical_appendix import build_technical_appendix_pdf, merge_technical_appendix
 
 NAVY = colors.HexColor("#12395e")
 INK = colors.HexColor("#1a1a1a")
@@ -177,14 +176,6 @@ def _render_brief(draft: ReportDraft, output_pdf: Path) -> None:
     c.drawRightString(page_w - 30, page_h - 31, f"Compact Equity Brief | {draft.report_date.isoformat()}")
 
     y = page_h - 72
-    if draft.contains_mock_data:
-        c.setFillColor(WARN)
-        c.roundRect(30, y - 20, page_w - 60, 20, 3, fill=1, stroke=0)
-        c.setFillColor(colors.HexColor("#7a4a00"))
-        c.setFont("Helvetica-Bold", 6.8)
-        c.drawString(36, y - 13, "ILLUSTRATIVE MOCK DATA - NOT INVESTMENT RESEARCH. Technical charts use Bloomberg OHLCV via MegadataAPI.")
-        y -= 29
-
     y = _key_data(c, draft, y)
 
     takeaways = draft.section(next(s.section for s in draft.sections if s.title == "Key Takeaways"))
@@ -305,17 +296,6 @@ def _render_brief(draft: ReportDraft, output_pdf: Path) -> None:
                 max_words=40, size=6.2, max_lines=2,
             )
 
-    gaps = list(draft.data_gaps)[:2]
-    if gaps:
-        c.setFillColor(MUTED)
-        c.setFont("Helvetica-Bold", 6.3)
-        if footer_y < 42:
-            c.drawString(30, 31, "Key limitations: detailed sources, data gaps and peer-comparison caveats remain in the full report.")
-        else:
-            c.drawString(30, footer_y, "Key disclosed limitations:")
-            for index, gap in enumerate(gaps):
-                _paragraph(c, 126, footer_y - index * 8, page_w - 156, gap.description,
-                           size=5.8, leading=7.0, max_lines=1, color=MUTED)
     c.setFillColor(MUTED)
     c.setFont("Helvetica", 5.8)
     c.drawRightString(page_w - 30, 17, "Page 1 of 2 | Compact version of the full structured report")
@@ -334,16 +314,17 @@ def render_compact_report(
     output_pdf = Path(output_pdf)
     draft, _ = load_report_json(report_json)
     brief_pdf = output_pdf.with_name(f"{output_pdf.stem}_brief.pdf")
+    appendix_pdf = output_pdf.with_name(f"{output_pdf.stem}_appendix.pdf")
     _render_brief(draft, brief_pdf)
     try:
-        return append_technical_appendix(
-            brief_pdf, output_pdf, draft.ticker or draft.company, draft.report_date,
-            page_label="Page 2 of 2",
-            credentials=credentials,
-            timeout=timeout,
+        build_technical_appendix_pdf(
+            draft.ticker or draft.company, draft.report_date, appendix_pdf,
+            page_label="Page 2 of 2", credentials=credentials, timeout=timeout,
         )
+        return merge_technical_appendix(brief_pdf, appendix_pdf, output_pdf)
     finally:
         brief_pdf.unlink(missing_ok=True)
+        appendix_pdf.unlink(missing_ok=True)
 
 
 def main() -> int:

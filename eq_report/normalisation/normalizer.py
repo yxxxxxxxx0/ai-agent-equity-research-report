@@ -54,6 +54,7 @@ from ..llm.verify import safe_complete_json, verify_number
 from ..logging_setup import get_logger, log_event
 from . import canonical_metrics as cm
 from .dates import normalise_date, normalise_fiscal_period
+from .reconciliation import reconcile
 from .units import (
     UNIT_COUNT,
     UNIT_CURRENCY,
@@ -65,7 +66,6 @@ from .units import (
     normalise_percent,
     parse_number,
 )
-from .reconciliation import reconcile
 
 logger = get_logger("normalisation")
 
@@ -300,7 +300,6 @@ class Normalizer:
                     confidence=self._confidence(observation.confidence),
                     raw_metric=observation.metric,
                     raw_value=observation.value,
-                    is_mock=observation.source.is_mock,
                     metadata=dict(observation.metadata),
                 ),
                 was_known,
@@ -373,7 +372,6 @@ class Normalizer:
             confidence=self._confidence(observation.confidence),
             raw_metric=observation.metric,
             raw_value=observation.value,
-            is_mock=observation.source.is_mock,
             metadata=metadata,
         )
         return item, was_known, flag
@@ -513,7 +511,6 @@ class Normalizer:
             confidence=self._confidence(passage.confidence),
             raw_metric=None,
             raw_value=None,
-            is_mock=passage.source.is_mock,
             metadata={"section": passage.section, **metadata},
         )
 

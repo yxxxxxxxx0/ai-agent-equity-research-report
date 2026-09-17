@@ -35,7 +35,7 @@ from ..domain.report import (
     ReportSectionDraft,
     Statement,
 )
-from ..domain.segment import DataGap, KeyFinding, SegmentResult
+from ..domain.segment import KeyFinding, SegmentResult
 from ..evidence.reader import EvidenceReader
 from ..logging_setup import get_logger, log_event
 from .citations import CitationRegistry
@@ -167,9 +167,6 @@ class Synthesizer:
         if ReportSection.SOURCES in self.plan.sections:
             sections.append(self._sources_section(segment_results))
 
-        all_gaps = self._collect_gaps(segment_results)
-        contains_mock = any(c.is_mock for c in self.citations.citations)
-
         draft = ReportDraft(
             report_run_id=self.report_run_id,
             company=self.plan.company,
@@ -179,8 +176,6 @@ class Synthesizer:
             title=self._title(),
             sections=tuple(sections),
             citations=self.citations.citations,
-            data_gaps=all_gaps,
-            contains_mock_data=contains_mock,
             key_data=build_key_data_panel(self.reader),
             metadata={
                 "latest_reported_period": self.reader.latest_reported_period(),
@@ -197,7 +192,7 @@ class Synthesizer:
         log_event(
             logger, logging.INFO, "synthesis complete",
             sections=len(draft.sections), statements=len(draft.all_statements),
-            citations=len(draft.citations), data_gaps=len(draft.data_gaps),
+            citations=len(draft.citations),
             duplicates_removed=self._duplicates_removed,
             sections_omitted=len(self._omitted),
         )
@@ -266,7 +261,8 @@ class Synthesizer:
                 continue
             self._omit(
                 section.section,
-                "the evidence supplied did not support any statement or exhibit",
+                "No validated MegaAPI evidence or deterministic analytic supported this "
+                "section, so it was omitted rather than fabricated.",
             )
 
         return [self._apply_fold(section, folded) for section in kept]
@@ -313,7 +309,6 @@ class Synthesizer:
             paragraphs=self._paragraphs(section, result),
             tables=self._tables(section),
             charts=self._charts(section),
-            data_gaps=result.data_gaps,
         )
 
     @staticmethod
@@ -475,7 +470,6 @@ class Synthesizer:
     def _sources_section(
         self, segment_results: tuple[SegmentResult, ...]
     ) -> ReportSectionDraft:
-        gaps = self._collect_gaps(segment_results)
         analytics_skipped = self.analytics.errors
         paragraphs = []
         if analytics_skipped:
@@ -492,28 +486,10 @@ class Synthesizer:
 
         return ReportSectionDraft(
             section=ReportSection.SOURCES,
-            title="Sources and Data Gaps",
-            summary=(
-                f"{len(self.citations.citations)} sources cited; "
-                f"{len(gaps)} data gaps recorded."
-            ),
+            title="Sources",
+            summary=f"{len(self.citations.citations)} sources cited.",
             paragraphs=tuple(paragraphs),
-            data_gaps=gaps,
         )
-
-    # -- helpers ---------------------------------------------------------
-    @staticmethod
-    def _collect_gaps(segment_results: tuple[SegmentResult, ...]) -> tuple[DataGap, ...]:
-        """All data gaps across segments, deduplicated on description."""
-        seen: set[str] = set()
-        gaps: list[DataGap] = []
-        for result in segment_results:
-            for gap in result.data_gaps:
-                if gap.description in seen:
-                    continue
-                seen.add(gap.description)
-                gaps.append(gap)
-        return tuple(gaps)
 
     def _title(self) -> str:
         ticker = f" ({self.plan.ticker})" if self.plan.ticker else ""

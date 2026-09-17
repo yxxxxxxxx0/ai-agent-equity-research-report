@@ -67,7 +67,6 @@ class CitationRegistry:
             evidence_id=item.evidence_id,
             text=text,
             source_url=item.original_source_url or item.source_url,
-            is_mock=item.is_mock,
         )
 
     @property

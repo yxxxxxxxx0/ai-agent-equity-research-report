@@ -25,10 +25,6 @@ class DataProvider(abc.ABC):
     name: str = "unnamed"
     #: One of "market_data" | "fundamentals" | "documents".
     branch: str = "unknown"
-    #: True when the provider returns illustrative sample data rather than
-    #: real observations. Mock data is labelled all the way to the PDF.
-    is_mock: bool = False
-
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
@@ -52,7 +48,6 @@ class DataProvider(abc.ABC):
                 branch=self.branch,
                 status=ProviderStatus.FAILED,
                 errors=(f"{type(exc).__name__}: {exc}",),
-                is_mock=self.is_mock,
                 duration_ms=(time.perf_counter() - started) * 1000,
             )
         return ProviderResult(
@@ -63,7 +58,6 @@ class DataProvider(abc.ABC):
             passages=payload.passages,
             errors=payload.errors,
             warnings=payload.warnings,
-            is_mock=self.is_mock,
             duration_ms=(time.perf_counter() - started) * 1000,
         )
 
@@ -91,7 +85,6 @@ class DataProvider(abc.ABC):
             passages=passages,
             warnings=warnings,
             errors=errors,
-            is_mock=self.is_mock,
         )
 
     def skipped(self, reason: str) -> ProviderResult:
@@ -100,14 +93,12 @@ class DataProvider(abc.ABC):
             branch=self.branch,
             status=ProviderStatus.SKIPPED,
             warnings=(reason,),
-            is_mock=self.is_mock,
         )
 
     def describe(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "branch": self.branch,
-            "is_mock": self.is_mock,
             "available": self.is_available(),
         }
 

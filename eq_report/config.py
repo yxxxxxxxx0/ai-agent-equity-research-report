@@ -37,26 +37,10 @@ def _env_int(name: str, default: int) -> int:
 class ProviderCredentials:
     """API credentials. Empty values mean the provider is unavailable."""
 
-    market_data_api_key: str | None = None
-    market_data_base_url: str | None = None
-    fundamentals_api_key: str | None = None
-    fundamentals_base_url: str | None = None
-    documents_api_key: str | None = None
-    documents_base_url: str | None = None
-    sec_user_agent: str | None = None
     megadata_base_url: str | None = None
     megadata_api_key: str | None = None
     megadata_username: str | None = None
     megadata_password: str | None = None
-
-    def has_market_data(self) -> bool:
-        return bool(self.market_data_api_key)
-
-    def has_fundamentals(self) -> bool:
-        return bool(self.fundamentals_api_key)
-
-    def has_documents(self) -> bool:
-        return bool(self.documents_api_key or self.sec_user_agent)
 
     def has_megadata(self) -> bool:
         return bool(self.megadata_base_url)
@@ -111,20 +95,12 @@ class Settings:
     database_path: Path
     log_level: str = "INFO"
     log_json: bool = False
-    allow_mock_providers: bool = True
     provider_timeout_seconds: int = 20
-    # Best-effort live web search (see pipeline.gap_research) to fill the
-    # report's own disclosed data gaps. Off by default: it is a genuine extra
-    # cost per run (one additional model call per gap, using OpenRouter's web
-    # plugin) on top of whatever the model is already configured for, so it
-    # needs its own opt-in rather than riding along with EQR_MODEL_API_KEY.
-    research_data_gaps: bool = False
-    research_data_gaps_max: int = 8
     # Best-effort live check (see pipeline.freshness_check) that the report's
     # dataset is anchored on the latest publicly reported fiscal period,
     # before analysis or synthesis run. A genuine extra cost per run (one
-    # additional model call, using OpenRouter's web plugin), so - like
-    # research_data_gaps - it needs its own opt-in.
+    # additional model call, using OpenRouter's web plugin), so it needs its
+    # own opt-in.
     check_data_freshness: bool = False
     # Best-effort live web verification (see qa.engine._adjudicate_metric_conflicts)
     # of a metric the deterministic checks found two sources disagreeing on: the
@@ -132,9 +108,13 @@ class Settings:
     # page (OpenRouter's web plugin) and may only unblock QA by matching a
     # candidate to that verified source - it is never allowed to just pick
     # whichever value seems more plausible. A genuine extra cost per conflict,
-    # so - like research_data_gaps - it needs its own opt-in.
+    # so it needs its own opt-in.
     verify_metric_conflicts: bool = False
-    online_sources: bool = False
+    # Repair statement-scoped QA failures inside the same run. The model may
+    # rewrite prose, but deterministic QA remains the publication gate; an
+    # unsafe/unrepairable statement is omitted rather than waved through.
+    qa_auto_repair: bool = True
+    qa_auto_repair_max_attempts: int = 2
     # Appends Bloomberg/MegadataAPI technical analysis to every full report.
     technical_appendix: bool = True
     # Produces a second, two-page investment brief from the same validated
@@ -161,13 +141,12 @@ class Settings:
             database_path=db_path,
             log_level=(_env("LOG_LEVEL", "INFO") or "INFO").upper(),
             log_json=_env_bool("LOG_JSON", False),
-            allow_mock_providers=_env_bool("ALLOW_MOCK_PROVIDERS", True),
             provider_timeout_seconds=_env_int("PROVIDER_TIMEOUT_SECONDS", 20),
-            research_data_gaps=_env_bool("RESEARCH_DATA_GAPS", False),
-            research_data_gaps_max=_env_int("RESEARCH_DATA_GAPS_MAX", 8),
             check_data_freshness=_env_bool("CHECK_DATA_FRESHNESS", False),
             verify_metric_conflicts=_env_bool("VERIFY_METRIC_CONFLICTS", False),
-            online_sources=_env_bool("ONLINE_SOURCES", False),
+            qa_auto_repair=_env_bool("QA_AUTO_REPAIR", True),
+            qa_auto_repair_max_attempts=max(
+                0, _env_int("QA_AUTO_REPAIR_MAX_ATTEMPTS", 2)),
             # Both deliverables are contractual pipeline outputs. Environment
             # flags are retained for backwards-compatible wrappers but may no
             # longer suppress either version.
@@ -175,13 +154,6 @@ class Settings:
             compact_report=True,
             planning_reasoning_effort=_env("PLANNING_REASONING_EFFORT"),
             credentials=ProviderCredentials(
-                market_data_api_key=_env("MARKET_DATA_API_KEY"),
-                market_data_base_url=_env("MARKET_DATA_BASE_URL"),
-                fundamentals_api_key=_env("FUNDAMENTALS_API_KEY"),
-                fundamentals_base_url=_env("FUNDAMENTALS_BASE_URL"),
-                documents_api_key=_env("DOCUMENTS_API_KEY"),
-                documents_base_url=_env("DOCUMENTS_BASE_URL"),
-                sec_user_agent=_env("SEC_USER_AGENT"),
                 megadata_base_url=_env("MEGADATA_BASE_URL"),
                 megadata_api_key=_env("MEGADATA_API_KEY"),
                 megadata_username=_env("MEGADATA_USERNAME"),
@@ -214,20 +186,15 @@ class Settings:
             "output_dir": str(self.output_dir),
             "database_path": str(self.database_path),
             "log_level": self.log_level,
-            "allow_mock_providers": self.allow_mock_providers,
             "provider_timeout_seconds": self.provider_timeout_seconds,
-            "research_data_gaps": self.research_data_gaps,
-            "research_data_gaps_max": self.research_data_gaps_max,
             "check_data_freshness": self.check_data_freshness,
+            "qa_auto_repair": self.qa_auto_repair,
+            "qa_auto_repair_max_attempts": self.qa_auto_repair_max_attempts,
             "verify_metric_conflicts": self.verify_metric_conflicts,
-            "online_sources": self.online_sources,
             "technical_appendix": self.technical_appendix,
             "compact_report": self.compact_report,
             "planning_reasoning_effort": self.planning_reasoning_effort,
             "credentials_present": {
-                "market_data": self.credentials.has_market_data(),
-                "fundamentals": self.credentials.has_fundamentals(),
-                "documents": self.credentials.has_documents(),
                 "megadata": self.credentials.has_megadata(),
             },
             "model": {

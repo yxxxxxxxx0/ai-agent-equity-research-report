@@ -18,6 +18,8 @@ directory so any point in the chain can be inspected afterwards.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -43,15 +45,17 @@ from ..logging_setup import configure_logging, get_logger, log_event
 from ..normalisation.normalizer import NormalisationResult, Normalizer
 from ..planning.research_planner import ResearchPlanner
 from ..qa.engine import QAEngine
+from ..qa.repair import DraftRepairer
+from ..rendering.compact_renderer import render_compact_report
 from ..rendering.json_writer import write_json, write_report_json, write_run_manifest
 from ..rendering.pdf_renderer import PdfReportRenderer
-from ..rendering.compact_renderer import render_compact_report
-from ..rendering.technical_appendix import append_technical_appendix
-from ..synthesis.annotate import build_annotations
+from ..rendering.technical_appendix import (
+    build_technical_appendix_pdf,
+    merge_technical_appendix,
+)
 from ..synthesis.llm_synthesizer import LLMSynthesizer
 from ..synthesis.synthesizer import Synthesizer
 from .freshness_check import FreshnessResult, check_freshness
-from .gap_research import apply_gap_research, research_gaps
 from .run_tracker import RunTracker, new_run_id
 
 logger = get_logger("pipeline")
@@ -67,7 +71,6 @@ class ReportResult:
     draft: ReportDraft | None = None
     qa_result: QAResult | None = None
     pdf_path: Path | None = None
-    annotated_pdf_path: Path | None = None
     compact_pdf_path: Path | None = None
     report_json_path: Path | None = None
     run_manifest_path: Path | None = None
@@ -80,8 +83,6 @@ class ReportResult:
         parts = [f"run {self.report_run_id}", self.status.value]
         if self.pdf_path:
             parts.append(f"pdf={self.pdf_path}")
-        if self.annotated_pdf_path:
-            parts.append(f"annotated_pdf={self.annotated_pdf_path}")
         if self.compact_pdf_path:
             parts.append(f"compact_pdf={self.compact_pdf_path}")
         if self.qa_result:
@@ -145,10 +146,6 @@ async def generate_report(
                 plan, market_service, fundamentals_service, documents_service)
             tracker.set_source_status(acquisition.to_dict())
             tracker.errors(acquisition.errors)
-            if acquisition.used_mock_data:
-                tracker.warn(
-                    "One or more branches returned illustrative sample data from a mock "
-                    "provider. The report is labelled accordingly.")
             _warn_on_dead_branches(tracker, acquisition)
             write_json(run_dir / "02_acquisition.json", {"branches": acquisition.to_dict()})
 
@@ -204,7 +201,31 @@ async def generate_report(
                     tracker.warn(
                         f"Data freshness check failed: {type(exc).__name__}: {exc}")
 
-        # 5. Analytics and segment agents --------------------------------
+        # 5. Analytics and segment agents, technical appendix ------------
+        # The technical appendix is a live Bloomberg OHLCV fetch plus a
+        # standalone chart render - independent of the report draft, so it
+        # is kicked off here to run concurrently with analysis rather than
+        # waiting until after QA passes, when it used to start.
+        technical_appendix_task: asyncio.Task | None = None
+        if settings.technical_appendix:
+            async def _build_technical_appendix() -> Path | None:
+                with tracker.stage("technical_appendix"):
+                    try:
+                        raw_path = run_dir / f"{report_run_id}_technical_appendix_raw.pdf"
+                        return await asyncio.to_thread(
+                            build_technical_appendix_pdf, plan.ticker, plan.request.report_date,
+                            raw_path, credentials=settings.credentials,
+                            timeout=settings.provider_timeout_seconds,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - non-core supplement
+                        log_event(logger, logging.WARNING, "technical appendix failed",
+                                  error=f"{type(exc).__name__}: {exc}")
+                        tracker.warn(
+                            f"Technical appendix could not be generated: "
+                            f"{type(exc).__name__}: {exc}")
+                        return None
+            technical_appendix_task = asyncio.create_task(_build_technical_appendix())
+
         with tracker.stage("analysis"):
             analytics, segment_results = await _run_analysis(
                 report_run_id, plan, reader, store, settings.model, usage_tracker)
@@ -247,46 +268,55 @@ async def generate_report(
                 draft = replace(draft, metadata={
                     **draft.metadata, "freshness_check": freshness.to_dict()})
 
-        # 6.5 Gap research (best-effort, opt-in) --------------------------
-        # Runs before the draft is persisted/QA'd, so a filled gap's evidence
-        # and addendum section are what both the draft JSON and QA validate
-        # against - not something bolted on after the fact.
-        if settings.research_data_gaps and settings.model.enabled:
-            with tracker.stage("gap_research"):
-                try:
-                    # reader.company, not plan.company: the Normalizer's
-                    # canonicalised name is what every other evidence item for
-                    # this ticker already carries (plan.company can be a fuller
-                    # form, e.g. "NVIDIA Corporation" vs "NVIDIA") - tagging new
-                    # evidence with a different spelling of the same company
-                    # is exactly the split identity check_entity_consistency
-                    # exists to catch.
-                    filled = await research_gaps(
-                        report_run_id, reader.company, plan.ticker, plan.request.report_date,
-                        draft.data_gaps, settings.model, tracker=usage_tracker,
-                        max_gaps=settings.research_data_gaps_max,
-                    )
-                    if filled:
-                        store.save(filled)
-                        draft = apply_gap_research(draft, filled)
-                        tracker.warn(
-                            f"Live web research resolved {len(filled)} disclosed data "
-                            "gap(s); see \"Additional Research (Web-Verified)\" in the "
-                            "report.")
-                except Exception as exc:  # noqa: BLE001 - never sink the run over this
-                    log_event(logger, logging.WARNING, "gap research failed",
-                              error=f"{type(exc).__name__}: {exc}")
-                    tracker.warn(
-                        f"Live web research for data gaps failed: "
-                        f"{type(exc).__name__}: {exc}")
-        write_json(run_dir / "06_report_draft.json", draft.to_dict())
+        write_json(run_dir / "06_report_draft_initial.json", draft.to_dict())
 
         # 7. QA ----------------------------------------------------------
         with tracker.stage("qa"):
-            qa_result = await QAEngine(
+            qa_engine = QAEngine(
                 model_config=settings.model, tracker=usage_tracker,
                 verify_conflicts=settings.verify_metric_conflicts,
-            ).validate(draft, plan, reader, analytics)
+            )
+            qa_result = await qa_engine.validate(draft, plan, reader, analytics)
+
+            repair_log: list[dict[str, Any]] = []
+            if settings.qa_auto_repair and qa_result.has_critical_errors:
+                repairer = DraftRepairer(settings.model, tracker=usage_tracker)
+                for attempt in range(1, settings.qa_auto_repair_max_attempts + 1):
+                    outcome = await repairer.repair(
+                        draft, qa_result, reader, analytics)
+                    repair_log.append({
+                        "attempt": attempt,
+                        "critical_before": len(qa_result.critical),
+                        "changed": outcome.changed,
+                        "llm_error": outcome.llm_error,
+                        "events": [event.to_dict() for event in outcome.events],
+                    })
+                    if not outcome.changed:
+                        break
+                    draft = outcome.draft
+                    qa_result = await qa_engine.validate(draft, plan, reader, analytics)
+                    repair_log[-1]["critical_after"] = len(qa_result.critical)
+                    if not qa_result.has_critical_errors:
+                        break
+
+            draft = replace(draft, metadata={
+                **draft.metadata,
+                "qa_auto_repair": {
+                    "enabled": settings.qa_auto_repair,
+                    "max_attempts": settings.qa_auto_repair_max_attempts,
+                    "attempts": repair_log,
+                    "final_critical_count": len(qa_result.critical),
+                    "publication_decision": "deterministic_qa",
+                },
+            })
+            write_json(run_dir / "06_report_draft.json", draft.to_dict())
+            write_json(run_dir / "07_qa_repair.json", {
+                "authority": {
+                    "llm": "may propose prose rewrites only",
+                    "deterministic": "validates evidence, arithmetic, and publication",
+                },
+                "attempts": repair_log,
+            })
             tracker.set_qa(qa_result.to_dict())
             write_json(run_dir / "07_qa.json", qa_result.to_dict())
 
@@ -295,6 +325,10 @@ async def generate_report(
         if qa_result.has_critical_errors:
             log_event(logger, logging.ERROR, "PDF suppressed by QA",
                       critical=len(qa_result.critical))
+            if technical_appendix_task is not None:
+                technical_appendix_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await technical_appendix_task
             tracker.set_outputs(json_path=str(report_json_path), pdf_path=None)
             write_json(run_dir / "validation_failure.json", {
                 "report_run_id": report_run_id,
@@ -312,49 +346,27 @@ async def generate_report(
                 report_json_path=report_json_path, run_manifest_path=manifest,
             )
 
-        # 8. PDF ---------------------------------------------------------
-        with tracker.stage("pdf"):
-            pdf_path = PdfReportRenderer(run_dir).render(draft, qa_result)
-        compact_pdf_path: Path | None = None
+        # 8. PDF and compact PDF, in parallel ------------------------------
+        # Neither depends on the other's output - the full PDF needs only
+        # draft/qa_result, the compact PDF only report_json_path (already
+        # written above) - so they render concurrently instead of back to
+        # back.
+        async def _render_pdf() -> Path:
+            with tracker.stage("pdf"):
+                return await asyncio.to_thread(
+                    PdfReportRenderer(run_dir).render, draft, qa_result)
 
-        # The technical page is deliberately appended only after the core PDF
-        # succeeds.  A market-data outage therefore never suppresses the
-        # evidence-backed report; it leaves a warning and preserves the base
-        # PDF instead.
-        if settings.technical_appendix:
-            with tracker.stage("technical_appendix"):
-                try:
-                    technical_pdf_path = run_dir / (
-                        f"{plan.ticker}_{plan.request.report_date:%Y%m%d}_"
-                        f"{report_run_id}_with_technical_appendix.pdf"
-                    )
-                    pdf_path = append_technical_appendix(
-                        pdf_path, technical_pdf_path, plan.ticker,
-                        plan.request.report_date,
-                        credentials=settings.credentials,
-                        timeout=settings.provider_timeout_seconds,
-                    )
-                except Exception as exc:  # noqa: BLE001 - non-core supplement
-                    log_event(logger, logging.WARNING, "technical appendix failed",
-                              error=f"{type(exc).__name__}: {exc}")
-                    tracker.warn(
-                        f"Technical appendix could not be generated: "
-                        f"{type(exc).__name__}: {exc}"
-                    )
-
-        # The compact version is a separate deliverable, not a replacement:
-        # it reuses the validated report JSON and appends its own technical
-        # page, so callers receive both the full narrative and the two-page
-        # decision brief from one run.
-        if settings.compact_report:
+        async def _render_compact() -> Path | None:
+            if not settings.compact_report:
+                return None
             with tracker.stage("compact_pdf"):
                 try:
                     compact_target = run_dir / (
                         f"{plan.ticker}_{plan.request.report_date:%Y%m%d}_"
                         f"{report_run_id}_compact_two_page.pdf"
                     )
-                    compact_pdf_path = render_compact_report(
-                        report_json_path, compact_target,
+                    return await asyncio.to_thread(
+                        render_compact_report, report_json_path, compact_target,
                         credentials=settings.credentials,
                         timeout=settings.provider_timeout_seconds,
                     )
@@ -365,23 +377,34 @@ async def generate_report(
                         f"Compact two-page report could not be generated: "
                         f"{type(exc).__name__}: {exc}"
                     )
+                    return None
 
-        # 8.5 Annotated companion PDF (best-effort) -----------------------
-        # Never gates the primary result: a failure here is logged and
-        # otherwise ignored, since the primary PDF is already final.
-        annotated_pdf_path: Path | None = None
-        with tracker.stage("annotate"):
-            try:
-                annotations = await build_annotations(
-                    draft, settings.model, tracker=usage_tracker)
-                annotated_pdf_path = PdfReportRenderer(run_dir).render_annotated(
-                    draft, annotations, qa_result)
-            except Exception as exc:  # noqa: BLE001 - a review aid, never load-bearing
-                log_event(logger, logging.WARNING, "annotated PDF failed",
-                          error=f"{type(exc).__name__}: {exc}")
-                tracker.warn(
-                    f"The annotated companion PDF could not be generated: "
-                    f"{type(exc).__name__}: {exc}")
+        pdf_path, compact_pdf_path = await asyncio.gather(_render_pdf(), _render_compact())
+
+        # The technical appendix was already fetched and rendered concurrently
+        # with analysis (see above); merging it onto the now-finished PDF is
+        # just a page concatenation, so a market-data outage there never
+        # suppresses the evidence-backed report - it leaves a warning and
+        # preserves the base PDF instead.
+        if technical_appendix_task is not None:
+            appendix_pdf_path = await technical_appendix_task
+            if appendix_pdf_path is not None:
+                try:
+                    technical_pdf_path = run_dir / (
+                        f"{plan.ticker}_{plan.request.report_date:%Y%m%d}_"
+                        f"{report_run_id}_with_technical_appendix.pdf"
+                    )
+                    pdf_path = await asyncio.to_thread(
+                        merge_technical_appendix, pdf_path, appendix_pdf_path,
+                        technical_pdf_path)
+                except Exception as exc:  # noqa: BLE001 - non-core supplement
+                    log_event(logger, logging.WARNING, "technical appendix merge failed",
+                              error=f"{type(exc).__name__}: {exc}")
+                    tracker.warn(
+                        f"Technical appendix could not be merged: "
+                        f"{type(exc).__name__}: {exc}")
+                finally:
+                    appendix_pdf_path.unlink(missing_ok=True)
 
         tracker.set_outputs(json_path=str(report_json_path), pdf_path=str(pdf_path))
         status = (
@@ -393,12 +416,11 @@ async def generate_report(
 
         log_event(logger, logging.INFO, "report run complete",
                   status=status.value, pdf=str(pdf_path),
-            annotated_pdf=str(annotated_pdf_path) if annotated_pdf_path else None,
                   compact_pdf=str(compact_pdf_path) if compact_pdf_path else None,
                   duration_ms=round(run.duration_ms or 0, 1))
         return ReportResult(
             report_run_id=report_run_id, status=status, run=run, draft=draft,
-            qa_result=qa_result, pdf_path=pdf_path, annotated_pdf_path=annotated_pdf_path,
+            qa_result=qa_result, pdf_path=pdf_path,
             compact_pdf_path=compact_pdf_path,
             report_json_path=report_json_path, run_manifest_path=manifest,
         )

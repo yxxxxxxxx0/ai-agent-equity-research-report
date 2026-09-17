@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .enums import ClaimType, Confidence, ReportSection
-from .segment import DataGap
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,7 +17,6 @@ class Citation:
     evidence_id: str
     text: str
     source_url: str | None = None
-    is_mock: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -26,7 +24,6 @@ class Citation:
             "evidence_id": self.evidence_id,
             "text": self.text,
             "source_url": self.source_url,
-            "is_mock": self.is_mock,
         }
 
 
@@ -176,7 +173,6 @@ class ReportSectionDraft:
     paragraphs: tuple[str, ...] = ()
     tables: tuple[MetricTable, ...] = ()
     charts: tuple[ChartSpec, ...] = ()
-    data_gaps: tuple[DataGap, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -187,7 +183,6 @@ class ReportSectionDraft:
             "paragraphs": list(self.paragraphs),
             "tables": [t.to_dict() for t in self.tables],
             "charts": [c.to_dict() for c in self.charts],
-            "data_gaps": [g.to_dict() for g in self.data_gaps],
         }
 
 
@@ -203,8 +198,6 @@ class ReportDraft:
     title: str
     sections: tuple[ReportSectionDraft, ...]
     citations: tuple[Citation, ...] = ()
-    data_gaps: tuple[DataGap, ...] = ()
-    contains_mock_data: bool = False
     key_data: KeyDataPanel | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -231,8 +224,6 @@ class ReportDraft:
             "title": self.title,
             "sections": [s.to_dict() for s in self.sections],
             "citations": [c.to_dict() for c in self.citations],
-            "data_gaps": [g.to_dict() for g in self.data_gaps],
-            "contains_mock_data": self.contains_mock_data,
             "key_data": self.key_data.to_dict() if self.key_data else None,
             "metadata": dict(self.metadata),
         }

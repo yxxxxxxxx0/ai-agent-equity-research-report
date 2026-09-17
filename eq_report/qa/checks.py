@@ -50,6 +50,7 @@ _NUMBER_RE = re.compile(
 # that must themselves have a canonical numeric evidence row.
 _DATE_OR_PERIOD_RE = re.compile(
     r"\b(?:FY\s*)?\d{4}\s*Q[1-4]\b|\bQ[1-4]\s*(?:FY\s*)?\d{4}\b"
+    r"|\bQ[1-4]\b"
     r"|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
     r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
     r"\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?\b|\b(?:19|20)\d{2}\b",
@@ -117,7 +118,7 @@ def check_claims_are_supported(context: QAContext) -> list[QAFinding]:
     for section in context.draft.sections:
         for statement in section.statements:
             supported = bool(statement.evidence_ids or statement.analytics_ids)
-            has_number = bool(_NUMBER_RE.search(statement.text))
+            has_number = has_asserted_numeric_fact(statement.text)
 
             if supported:
                 continue
@@ -579,8 +580,7 @@ def check_requested_sections_present(context: QAContext) -> list[QAFinding]:
         # the renderer prints under it rather than storing on the section.
         if requested is ReportSection.SOURCES and context.draft.citations:
             continue
-        if not (section.statements or section.paragraphs or section.tables
-                or section.data_gaps):
+        if not (section.statements or section.paragraphs or section.tables):
             findings.append(QAFinding(
                 check="narrative.section_populated",
                 severity=Severity.WARNING,
@@ -688,36 +688,6 @@ def check_duplication(context: QAContext) -> list[QAFinding]:
     return findings
 
 
-def check_data_gaps_reported(context: QAContext) -> list[QAFinding]:
-    """Unresolved data gaps must be visible in the report, not just internally."""
-    findings: list[QAFinding] = []
-    if not context.draft.data_gaps:
-        return findings
-
-    sources_section = context.draft.section(ReportSection.SOURCES)
-    reported = {gap.description for gap in (sources_section.data_gaps if sources_section else ())}
-    # A user who did not ask for a sources section has not asked for the gap
-    # disclosure either; the gap is still reported, but it does not block.
-    sources_requested = ReportSection.SOURCES in context.plan.request.sections
-    for gap in context.draft.data_gaps:
-        undisclosed = gap.description not in reported
-        severity = (
-            Severity.CRITICAL if (undisclosed and sources_requested) else Severity.WARNING)
-        findings.append(QAFinding(
-            check="narrative.data_gap",
-            severity=severity,
-            message=(
-                f"Unresolved data gap: {gap.description}"
-                + (f" Impact: {gap.impact}" if gap.impact else "")
-                + ("" if not undisclosed
-                   else " This gap is not disclosed in the report.")
-            ),
-            section=gap.segment.value if gap.segment else None,
-            subject=gap.missing_metric,
-        ))
-    return findings
-
-
 def check_data_freshness(context: QAContext) -> list[QAFinding]:
     """A live-verified newer public report must be disclosed, not silent.
 
@@ -738,27 +708,6 @@ def check_data_freshness(context: QAContext) -> list[QAFinding]:
         ),
         details=finding,
     )]
-
-
-def check_mock_data_disclosed(context: QAContext) -> list[QAFinding]:
-    """Sample data must be labelled, and the label must reach the reader."""
-    findings: list[QAFinding] = []
-    if not context.draft.contains_mock_data:
-        return findings
-    findings.append(QAFinding(
-        check="narrative.mock_data_disclosed",
-        severity=Severity.WARNING,
-        message=(
-            "The report is built on illustrative sample data from mock providers. "
-            "It must not be circulated as research."
-        ),
-        details={
-            "mock_citations": [
-                c.ref_number for c in context.draft.citations if c.is_mock
-            ][:20],
-        },
-    ))
-    return findings
 
 
 # ---------------------------------------------------------------------------
@@ -826,6 +775,4 @@ ALL_CHECKS = (
     check_judgmental_language,
     check_duplication,
     check_data_freshness,
-    check_data_gaps_reported,
-    check_mock_data_disclosed,
 )

@@ -605,9 +605,6 @@ class AnalyticsEngine:
         meta = dict(metadata or {})
         if analytics_inputs:
             meta["input_analytics_ids"] = list(analytics_inputs)
-        if any(item.is_mock for item in evidence):
-            meta["derived_from_mock_data"] = True
-
         self._results.append(AnalyticsResult(
             analytics_id=make_analytics_id(
                 self.report_run_id, metric, period or "", comparison_period or "",

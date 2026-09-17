@@ -4,9 +4,9 @@ A local, end-to-end prototype that turns a research request into a draft equity
 research PDF. The core stack is **Python, standard-library dataclasses for the
 typed models, SQLite for the Evidence Store, `reportlab` for the PDF**.
 
-It runs with no credentials and no network access: every branch falls back to a
-clearly-labelled mock provider, and the label follows the data all the way onto
-the front page of the PDF.
+All acquisition branches use MegadataAPI. There is no mock, public-web or
+generic vendor fallback: if MegadataAPI is missing or unavailable, the run
+records the acquisition failure instead of substituting synthetic data.
 
 ```bash
 pip install -r requirements.txt
@@ -145,21 +145,8 @@ eq_report/
 │
 ├── providers/                       # 3. acquisition interfaces + implementations
 │   ├── base.py                      #   DataProvider / MarketData / Fundamentals / Documents ABCs
-│   ├── registry.py                  #   config-driven selection; Megadata > HTTP/online > mock
-│   ├── sample_data.py               #   ★ ALL synthetic data lives here, nowhere else
-│   ├── megadata.py                  #   real HTTP provider set (enabled by EQR_MEGADATA_BASE_URL)
-│   ├── arcticdb/                    #   legacy inactive adapter retained for reference
-│   │   ├── client.py · market_data.py · fundamentals.py · documents.py
-│   │   └── fiscal_period.py         #   optionally uses the generic OpenRouter client to
-│   │                                 #   resolve fiscal-period labels
-│   ├── openrouter_search.py         #   last real-data tier: asks GPT (OpenRouter's web-search
-│   │                                 #   plugin) to look up the plan's required figures online
-│   │                                 #   when no other real provider is configured; falls back
-│   │                                 #   to mock per-branch only if the search finds nothing
-│   ├── market_data/http_provider.py #   generic real REST seam (enabled by credentials)
-│   ├── market_data/mock_provider.py
-│   ├── fundamentals/mock_provider.py
-│   └── documents/mock_provider.py
+│   ├── registry.py                  #   Megadata-only selection, no data fallback
+│   └── megadata.py                  #   all three real-data branches
 │
 ├── acquisition/services.py          # 3. three branches, run concurrently, never raise
 │
@@ -244,10 +231,8 @@ catches it, records a `Rejection` with a reason, and the value never becomes
 evidence. Twelve parametrised cases cover this. (`"31.4x"` — a multiple written
 the way it conventionally is — used to be one of the false-positive
 rejections: `parse_number` treated the trailing `x` as an unrecognised
-magnitude suffix rather than the identity scale a multiple needs. The mock
-data always supplied bare floats for `forward_pe`/`trailing_pe`/`ev_to_sales`
-so this never surfaced until the OpenRouter web-search provider — §5b — began
-returning multiples the way a real source actually writes them. Fixed in
+magnitude suffix rather than the identity scale a multiple needs. Provider
+payloads may return multiples in the conventional suffixed form. Fixed in
 `units._SCALE_SUFFIXES`.)
 
 **Exhibits are built centrally, not per agent.** `LLMSegmentAgent`'s
@@ -319,13 +304,8 @@ reason.
 **One agent, two sections.** The risk/catalyst agent tags its findings `risk` /
 `catalyst` and writes a narrative for each; the synthesis layer splits them.
 
-**Sample data is quarantined and labelled.** All synthetic values live in
-`providers/sample_data.py`. `is_mock` propagates provider → observation →
-evidence → citation → `ReportDraft.contains_mock_data` → a banner on page 1, a
-footer on every page, `[sample data]` on every source line, and a QA warning.
-The values are deliberately *messy* (`"$62,300,000,000"`, `"62.3B"`, `"74.8%"`,
-`"Aug 19, 2026"`, `"19/08/2026"`, `totalRevenue` / `Gross Margin` / `forwardPE`)
-so normalisation is genuinely exercised rather than bypassed.
+**No synthetic fallback.** Provider failure is retained as a structured
+acquisition error. The pipeline never substitutes generated sample values.
 
 **Failure policy.** Recoverable problems become `PipelineError` records attached
 to the run; only an unrecoverable stage failure raises. A provider that throws
@@ -365,7 +345,7 @@ break it → what matters next.
 - *Numerical* — every analytic independently recomputed; units known and semantically right; decimal-fraction-as-percentage detection.
 - *Temporal* — periods comparable; no observation dated after the report; the analysed period is named in prose.
 - *Consistency* — one name per ticker, one ticker per company, one currency; no contradictory values for the same metric and period (>1% spread is critical, rounding is a warning).
-- *Narrative* — requested sections present and populated; unsourced causal claims; verbatim duplication; undisclosed data gaps; mock-data disclosure.
+- *Narrative* — requested sections present and populated; unsourced causal claims; verbatim duplication; undisclosed data gaps.
 
 ---
 
@@ -401,6 +381,11 @@ reports only *whether* a credential is present, never its value; there is a test
 asserting that.
 
 Exit code is `0` on success, `1` if QA blocked the PDF or a stage failed.
+Statement-scoped QA errors are repaired and rechecked automatically within the
+same run; see [QA authority and automatic repair](docs/QA_REPAIR.md) for the
+deterministic/LLM boundary and the remaining hard-block conditions.
+The complete per-stage authority map and opt-in flags are in
+[Deterministic and LLM execution authority](docs/EXECUTION_AUTHORITY.md).
 
 ### 5a. Optional GPT-backed stages (OpenRouter)
 
@@ -430,31 +415,12 @@ Engine and Evidence Store are never in the model's path. A run's
 pass `EQR_LOG_JSON=true` to get per-call `input_tokens`/`output_tokens` in the
 log stream for cost tracking.
 
-### 5b. Data acquisition fallback: OpenRouter web search
+### 5b. Data acquisition
 
-Provider selection per branch (market data / fundamentals / documents) is:
-**Megadata > a vendor HTTP client (market data only) > OpenRouter
-web search > mock**. The new tier, `providers/openrouter_search.py`, only
-engages when no real feed above it is configured *and* an OpenRouter API key
-is set (the same `EQR_MODEL_API_KEY`/`OPENROUTER_API_KEY` as §5a — no separate
-toggle). It asks the model, with OpenRouter's `{"plugins": [{"id": "web"}]}`
-search plugin turned on, to look up the plan's required fields online and
-return only what it can cite a real URL for; anything it can't find is left
-null rather than guessed. Its output goes through the same normalisation,
-Evidence Store and QA path as every other provider — nothing downstream
-treats it specially — and it is stamped `Confidence.MEDIUM` and
-`metadata.acquired_via = "openrouter_web_search"` so it stays visibly
-distinct from a licensed vendor feed in the evidence record. It is not
-`is_mock`: it is real (if unverified) web data, so `contains_mock_data` is not
-set from it. If the search call fails or finds nothing for a branch, that
-branch falls back to the mock provider exactly as before, and the run is
-labelled accordingly.
-
-Trying this against NVDA with no other provider configured pulled real,
-citable figures (e.g. share price and market cap from Yahoo Finance /
-StockAnalysis.com, segment revenue and KPIs from NVIDIA's own FY2027 Q2 press
-release and 10-Q on SEC EDGAR) — see `providers.registry` and
-`providers.openrouter_search` log lines for which tier actually served a run.
+MegadataAPI is the sole acquisition provider for market data, fundamentals and
+documents. It is enabled by `EQR_MEGADATA_BASE_URL` and its Basic or Bearer
+credentials. Missing configuration, network failure or an empty response is
+recorded as an acquisition error; no synthetic or public-web fallback runs.
 
 ## 6. Tests
 
@@ -540,8 +506,7 @@ numbers are assigned in order of first use, so they shift if the request changes
 > - On the requested emphasis 'gross margin trajectory': non-GAAP gross margin is expected to be 75.5% for the third quarter, plus or minus 50 basis points. *(management)*[73]
 >
 > **Sources**
-> `[1] [sample data] Mock fundamentals feed (reported_financials), Revenue (FY2026 Q2)`
-> `[15] [sample data] U.S. Securities and Exchange Commission (EDGAR) - Quarterly Report on Form 10-Q for the quarter ended July 31, 2026 - 2026-08-22, Item 1A - Risk Factors <https://example.invalid/edgar/nvda/10-q-fy2026-q2>`
+> `[1] MegadataAPI, Revenue (FY2026 Q2)`
 
 Note the `(reported)` / `(calculated)` / `(management)` / `(market expectation)`
 / `(interpretation)` label on every line: fact, arithmetic, management assertion,
@@ -594,29 +559,6 @@ failure can let judgmental language through:
 See `docs/PENDING_CHANGES.md` for the larger neutral-analysis redesign this
 is part of, including what is deferred.
 
-### Live web research for data gaps (opt-in)
-
-`EQR_RESEARCH_DATA_GAPS=true` (default off - see `.env.example`) adds one stage
-between synthesis and QA: for each of the report's disclosed data gaps, up to
-`EQR_RESEARCH_DATA_GAPS_MAX` (default 8), the model is asked - with
-OpenRouter's web-search plugin turned on - to find a real, dated, source-linked
-answer (`pipeline/gap_research.py`). A gap is only accepted if the model
-returns an actual URL and a factual answer; anything without one is treated as
-"not found" rather than trusted, the same rule the rest of the pipeline
-applies to any claim with no resolvable evidence id. Accepted answers are
-written to the Evidence Store as ordinary, non-mock evidence and surfaced as
-their own "Additional Research (Web-Verified)" section, with the now-filled
-gaps struck from the disclosed gap list - see `apply_gap_research`.
-
-Because this is a genuinely live search against the real web, an accepted
-answer will report NVIDIA's actual reported figures, which do **not** match
-the illustrative sample data the rest of the report is built on (the sample
-data does not correspond to any real fiscal period). This is expected: it is
-what a live source is supposed to return. It is also why this only makes
-sense as a demonstration of the mechanism, not a way to reconcile a
-mock-data report with reality - a real deployment (real providers) would not
-have this seam.
-
 ### Annotated companion PDF
 
 Every run also produces a second PDF (`..._annotated.pdf`, same run
@@ -640,38 +582,22 @@ for any period. Impact: The financial performance section cannot be written.")
 and **zero invented numbers**. There is a test asserting that every statement in
 that run still carries evidence or analytics references.
 
-## 9. Mocked components — clearly identified
+## 9. Runtime boundaries
 
 | Component | Status | Notes |
 |---|---|---|
-| `providers/sample_data.py` | **entirely synthetic** | Every figure in the example report above. NVIDIA-shaped in scale and structure so real code paths are exercised; **not real reported figures**. Header says so. |
-| `MockMarketDataProvider` | **mock** | `is_mock=True`. Quote, multiples, consensus, estimates, price history, forward-P/E history, peer data. |
-| `MockFundamentalsProvider` | **mock** | `is_mock=True`. Three fiscal periods, segment revenue, KPIs, consensus, guidance. |
-| `MockDocumentsProvider` | **mock** | `is_mock=True`. 10 documents / 21 passages: earnings release, 10-Q, transcript, deck, two announcements, two news items, a competitor filing, industry research. URLs are `example.invalid`. |
-| `HttpMarketDataProvider` | **real, unexercised** | Genuine REST client. Disabled without `EQR_MARKET_DATA_API_KEY` + `EQR_MARKET_DATA_BASE_URL`; the registry then uses the mock. Tested for the *skip* path only — never run against a live endpoint. |
-| `providers/megadata.py` | **real, network-dependent** | Real HTTP provider set, enabled by `EQR_MEGADATA_BASE_URL`. Falls back to mock if the endpoint is unreachable within `EQR_PROVIDER_TIMEOUT_SECONDS`. |
-| `providers/arcticdb/` | **inactive legacy code** | Retained for reference but no longer selected or configured by the runtime pipeline. |
+| `providers/megadata.py` | **sole data provider** | Serves market data, fundamentals and documents. Failure remains visible; there is no data fallback. |
 | `ResearchPlanner` ticker resolution | **13-entry lookup** | Not a security master. An unresolved name plans without a ticker and records it. |
 | `EvidenceReader.documents_matching` | **substring keyword match** | Deliberately transparent. The natural place for embeddings later; no agent would change. |
 | LLM usage | **optional, implemented, off by default** | `ModelConfig` is used: `ResearchPlanner` plans via GPT through OpenRouter whenever `EQR_MODEL_API_KEY` is set; `LLMSegmentAgent` and `LLMSynthesizer` additionally replace their deterministic counterparts under `EQR_MODEL_USE_FOR_AGENTS`/`EQR_MODEL_USE_FOR_SYNTHESIS`. All three are constrained to cite only ids they were actually shown. With no model variables set, behaviour is unchanged from a fully deterministic run. |
-
-The mock label is load-bearing: it reaches the front page, every page footer,
-every source line, and a QA warning. `contains_mock_data` is asserted in the
-end-to-end test.
 
 ## 10. Next components to productionise
 
 In the order I would tackle them.
 
-1. **Real fundamentals** — SEC EDGAR XBRL company-facts for reported financials,
-   with a filing-level cache. The biggest credibility gap: everything numeric in
-   the report currently comes from `sample_data.py`.
-2. **Real market data** — finish `HttpMarketDataProvider` against a chosen
-   vendor. Only `_parse` needs writing; normalisation and everything downstream
-   are already vendor-agnostic. Add response caching and rate limiting.
-3. **Real documents** — EDGAR full-text search plus a PDF/HTML extractor that
-   preserves section and page. `RawDocumentPassage` already carries the fields.
-4. **Consensus** — the one input with no free source. Until it exists, every
+1. **Megadata completeness** — expand endpoint coverage for every required
+   fundamental, market and document field while retaining raw payload paths.
+2. **Consensus** — ensure licensed consensus coverage is complete. Until it exists, every
    surprise and guidance-versus-consensus number is synthetic; the engine
    already degrades to a documented gap without it.
 5. **Ticker and entity resolution** — replace the lookup dict with a security

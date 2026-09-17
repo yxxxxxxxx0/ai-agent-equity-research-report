@@ -32,7 +32,15 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from flask import Flask, jsonify, redirect, render_template_string, request, send_file, url_for
+from flask import (
+    Flask,
+    jsonify,
+    redirect,
+    render_template_string,
+    request,
+    send_file,
+    url_for,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -80,12 +88,13 @@ STAGES: tuple[tuple[str, str, str], ...] = (
     ("normalisation", "Normalisation", "Reconcile sources into canonical evidence"),
     ("evidence_ingestion", "Evidence store", "Write canonical evidence to the store"),
     ("analysis", "Analysis", "Run analytics and the segment research agents"),
+    ("technical_appendix", "Technical appendix", "Fetch and chart Bloomberg OHLCV - runs "
+     "alongside analysis, independent of the report draft"),
     ("synthesis", "Synthesis", "Draft the report's narrative and exhibits"),
     ("qa", "QA", "Check every claim against the evidence store"),
     ("pdf", "Render PDF", "Lay out the full report"),
-    ("technical_appendix", "Technical appendix", "Append the technical-analysis page"),
-    ("compact_pdf", "Compact PDF", "Render the two-page short version"),
-    ("annotate", "Annotate", "Build the reviewer-annotated companion PDF"),
+    ("compact_pdf", "Compact PDF", "Render the two-page short version - runs alongside "
+     "the full PDF"),
 )
 STAGE_KEYS = tuple(key for key, _, _ in STAGES)
 
@@ -100,12 +109,15 @@ _orig_stage = run_tracker_module.RunTracker.stage
 
 @contextmanager
 def _tracked_stage(self, name):  # noqa: ANN001 - mirrors RunTracker.stage's signature
+    # A list, not a single value: the pipeline now genuinely runs some
+    # stages concurrently (technical_appendix alongside analysis, pdf
+    # alongside compact_pdf), so more than one can be "current" at once.
     job_id = _THREAD_JOB.get(threading.get_ident())
     if job_id:
         with _JOBS_LOCK:
             job = JOBS.get(job_id)
             if job is not None:
-                job["stage"] = name
+                job.setdefault("active_stages", []).append(name)
                 job["stage_started_at"] = time.time()
     try:
         with _orig_stage(self, name) as timing:
@@ -114,8 +126,12 @@ def _tracked_stage(self, name):  # noqa: ANN001 - mirrors RunTracker.stage's sig
         if job_id:
             with _JOBS_LOCK:
                 job = JOBS.get(job_id)
-                if job is not None and name not in job["completed_stages"]:
-                    job["completed_stages"].append(name)
+                if job is not None:
+                    active = job.setdefault("active_stages", [])
+                    if name in active:
+                        active.remove(name)
+                    if name not in job["completed_stages"]:
+                        job["completed_stages"].append(name)
 
 
 run_tracker_module.RunTracker.stage = _tracked_stage
@@ -134,6 +150,21 @@ def _run_job(job_id: str, ticker: str, report_date: dt.date) -> None:
         result = generate_report_sync(research_request, settings)
         usage = (result.run.llm_usage or {}) if result.run else {}
         qa = result.qa_result
+        run_dir = Path(result.report_json_path).parent if result.report_json_path else None
+        artifact_candidates = {
+            "compact_pdf": ("Compact PDF", result.compact_pdf_path),
+            "full_pdf": ("Full PDF", result.pdf_path),
+            "report_json": ("Report JSON", result.report_json_path),
+            "qa_json": ("QA findings", run_dir / "07_qa.json" if run_dir else None),
+            "repair_json": ("Repair log", run_dir / "07_qa_repair.json" if run_dir else None),
+            "validation_json": (
+                "Blocking details", run_dir / "validation_failure.json" if run_dir else None),
+        }
+        artifacts = {
+            key: {"label": label, "path": str(path)}
+            for key, (label, path) in artifact_candidates.items()
+            if path is not None and Path(path).exists()
+        }
         qa_reasons: list[dict] = []
         if qa is not None and qa.critical:
             counts: dict[str, int] = {}
@@ -158,6 +189,7 @@ def _run_job(job_id: str, ticker: str, report_date: dt.date) -> None:
                 qa_critical=len(qa.critical) if qa else None,
                 qa_warnings=len(qa.warnings) if qa else None,
                 qa_reasons=qa_reasons,
+                artifacts=artifacts,
                 error=None if (result.succeeded and result.compact_pdf_path) else (
                     f"QA blocked publication: {len(qa.critical)} critical finding(s)."
                     if (qa is not None and qa.critical)
@@ -198,7 +230,7 @@ def generate():
             "ticker": ticker,
             "report_date": report_date.isoformat(),
             "status": "queued",
-            "stage": None,
+            "active_stages": [],
             "completed_stages": [],
         }
     threading.Thread(target=_run_job, args=(job_id, ticker, report_date), daemon=True).start()
@@ -229,6 +261,20 @@ def job_pdf(job_id: str):
     if job is None or not job.get("compact_pdf"):
         return "No compact PDF for this job yet.", 404
     return send_file(job["compact_pdf"], mimetype="application/pdf")
+
+
+@app.route("/document/<job_id>/<kind>", methods=["GET"])
+def job_document(job_id: str, kind: str):
+    """Open one allow-listed output produced by this in-memory job."""
+    job = JOBS.get(job_id)
+    artifact = (job or {}).get("artifacts", {}).get(kind)
+    if not artifact:
+        return "Document is not available for this job.", 404
+    path = Path(artifact["path"])
+    if not path.is_file():
+        return "Document no longer exists.", 404
+    mimetype = "application/pdf" if path.suffix.lower() == ".pdf" else "application/json"
+    return send_file(path, mimetype=mimetype, as_attachment=False)
 
 
 # -- visual system --------------------------------------------------------
@@ -327,8 +373,8 @@ BASE_STYLE = """
        not a flattened step list. Nodes glow live on the job page; the
        same markup sits inert on the home page as a map of how this works. */
     .fc-scroll { overflow-x: auto; margin-bottom: 20px; }
-    .fc-wrap { position: relative; width: 680px; height: 940px; margin: 0 auto; }
-    .fc-svg { position: absolute; top: 0; left: 0; width: 680px; height: 940px; pointer-events: none; }
+    .fc-wrap { position: relative; width: 680px; height: 700px; margin: 0 auto; }
+    .fc-svg { position: absolute; top: 0; left: 0; width: 680px; height: 700px; pointer-events: none; }
     .fc-node {
       position: absolute; border: 1px solid var(--hairline); background: var(--paper);
       border-radius: 4px; padding: 8px 11px; display: flex; flex-direction: column;
@@ -369,12 +415,13 @@ BASE_STYLE = """
 # Absolute-positioned nodes + an SVG line layer, laid out to match the
 # pipeline's real shape: request -> plan -> {market data | fundamentals |
 # documents} -> normalisation -> evidence store -> {analytics | segment
-# agents} -> synthesis -> QA -> (pass) pdf.. / (blocked) withheld.
-# See eq_report/pipeline/orchestrator.py's own module docstring for the
-# canonical version of this diagram in prose.
+# agents | technical appendix} -> synthesis -> QA -> (pass) {pdf | compact
+# pdf} / (blocked) withheld. Technical appendix and compact/full PDF are
+# genuinely concurrent in the pipeline now (see orchestrator.py), not just
+# drawn that way - the diagram matches the real asyncio.gather() calls.
 FLOWCHART_HTML = """
 <div class="fc-scroll"><div class="fc-wrap">
-  <svg class="fc-svg" viewBox="0 0 680 940">
+  <svg class="fc-svg" viewBox="0 0 680 700">
     <defs>
       <marker id="fc-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
         <path d="M0,0 L10,5 L0,10 z" style="fill:var(--rule)"></path>
@@ -402,25 +449,24 @@ FLOWCHART_HTML = """
       <path d="M340,242 L340,270"></path>
 
       <path d="M340,326 L340,340"></path>
-      <path d="M190,340 L490,340"></path>
-      <path d="M190,340 L190,354"></path>
-      <path d="M490,340 L490,354"></path>
+      <path d="M135,340 L545,340"></path>
+      <path d="M135,340 L135,354"></path>
+      <path d="M340,340 L340,354"></path>
+      <path d="M545,340 L545,354"></path>
 
-      <path d="M190,414 L190,428"></path>
-      <path d="M490,414 L490,428"></path>
-      <path d="M190,428 L490,428"></path>
+      <path d="M135,414 L135,428"></path>
+      <path d="M340,414 L340,428"></path>
+      <path d="M545,414 L545,428"></path>
+      <path d="M135,428 L545,428"></path>
       <path d="M340,428 L340,440"></path>
 
       <path d="M340,496 L340,524"></path>
-
-      <path d="M340,664 L340,692"></path>
-      <path d="M340,748 L340,776"></path>
-      <path d="M340,832 L340,860"></path>
     </g>
-    <path d="M340,580 L340,605" style="stroke:var(--pos);stroke-width:2;fill:none;" marker-end="url(#fc-arrow-pos)"></path>
-    <path d="M440,552 L462,552 L462,608 L477,608" style="stroke:var(--neg-border);stroke-width:2;fill:none;" marker-end="url(#fc-arrow-neg)"></path>
-    <text x="346" y="596" style="font:700 9.5px var(--font-ui);fill:var(--pos);">clears QA</text>
-    <text x="485" y="572" style="font:700 9.5px var(--font-ui);fill:var(--neg-ink);">critical findings</text>
+    <path d="M340,580 L340,605 M190,605 L490,605 M190,605 L190,620 M490,605 L490,620"
+          style="stroke:var(--pos);stroke-width:2;fill:none;" marker-end="url(#fc-arrow-pos)"></path>
+    <path d="M440,552 L480,552" style="stroke:var(--neg-border);stroke-width:2;fill:none;" marker-end="url(#fc-arrow-neg)"></path>
+    <text x="304" y="598" style="font:700 9.5px var(--font-ui);fill:var(--pos);">clears QA</text>
+    <text x="480" y="515" style="font:700 9.5px var(--font-ui);fill:var(--neg-ink);">critical findings</text>
   </svg>
 
   <div class="fc-node" data-key="planning" style="left:240px;top:16px;width:200px;height:56px;">
@@ -445,11 +491,14 @@ FLOWCHART_HTML = """
     <div class="fc-name">Evidence store</div><div class="fc-blurb">Canonical facts, written</div>
   </div>
 
-  <div class="fc-node" data-key="analysis" style="left:50px;top:354px;width:280px;height:60px;">
+  <div class="fc-node" data-key="analysis" style="left:40px;top:354px;width:190px;height:60px;">
     <div class="fc-name">Analytics engine</div><div class="fc-blurb">Growth, mix, surprise</div>
   </div>
-  <div class="fc-node" data-key="analysis" style="left:350px;top:354px;width:280px;height:60px;">
+  <div class="fc-node" data-key="analysis" style="left:245px;top:354px;width:190px;height:60px;">
     <div class="fc-name">Segment agents</div><div class="fc-blurb">Per-section research</div>
+  </div>
+  <div class="fc-node" data-key="technical_appendix" style="left:450px;top:354px;width:190px;height:60px;">
+    <div class="fc-name">Technical appendix</div><div class="fc-blurb">Live OHLCV chart, independent of the draft</div>
   </div>
 
   <div class="fc-node" data-key="synthesis" style="left:240px;top:440px;width:200px;height:56px;">
@@ -459,22 +508,15 @@ FLOWCHART_HTML = """
   <div class="fc-node fc-gate" data-key="qa" style="left:240px;top:524px;width:200px;height:56px;">
     <div class="fc-name">QA gate</div><div class="fc-blurb">Check every claim vs. evidence</div>
   </div>
-
-  <div class="fc-node" data-key="pdf" style="left:240px;top:608px;width:200px;height:56px;">
-    <div class="fc-name">Render PDF</div><div class="fc-blurb">Lay out the full report</div>
-  </div>
-  <div class="fc-node fc-blocked" data-key="__blocked" style="left:480px;top:580px;width:170px;height:60px;">
+  <div class="fc-node fc-blocked" data-key="__blocked" style="left:480px;top:524px;width:170px;height:56px;">
     <div class="fc-name">Blocked</div><div class="fc-blurb">No PDF - fixes required</div>
   </div>
 
-  <div class="fc-node" data-key="technical_appendix" style="left:240px;top:692px;width:200px;height:56px;">
-    <div class="fc-name">Technical appendix</div><div class="fc-blurb">Append the TA page</div>
+  <div class="fc-node" data-key="pdf" style="left:50px;top:620px;width:280px;height:60px;">
+    <div class="fc-name">Render PDF</div><div class="fc-blurb">Full report, merged with the technical appendix</div>
   </div>
-  <div class="fc-node" data-key="compact_pdf" style="left:240px;top:776px;width:200px;height:56px;">
+  <div class="fc-node" data-key="compact_pdf" style="left:350px;top:620px;width:280px;height:60px;">
     <div class="fc-name">Compact PDF</div><div class="fc-blurb">Two-page short version</div>
-  </div>
-  <div class="fc-node" data-key="annotate" style="left:240px;top:860px;width:200px;height:56px;">
-    <div class="fc-name">Annotate</div><div class="fc-blurb">Reviewer companion PDF</div>
   </div>
 </div></div>
 """
@@ -565,6 +607,15 @@ JOB_HTML = """
     .qa-panel td { border-bottom-color: rgba(193, 68, 46, 0.18); }
     .qa-panel tbody tr:nth-child(even) td { background: rgba(193, 68, 46, 0.05); }
 
+    .documents { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+    .document-link { display: inline-block; padding: 8px 11px; border: 1px solid var(--accent-line);
+      border-radius: 3px; background: var(--accent-soft); color: var(--accent);
+      font-size: 12px; font-weight: 700; text-decoration: none; }
+    .document-link:hover { background: #d7e3ee; }
+    .report-previews { display: grid; grid-template-columns: 1fr; gap: 24px; margin-top: 22px; }
+    .report-preview h2 { font-size: 14px; margin: 0 0 8px; color: var(--ink); }
+    .report-preview embed { width: 100%; height: 78vh; min-height: 620px; border: 1px solid var(--line); background: white; }
+
     embed { width: 100%; height: 86vh; border: 1px solid var(--hairline); border-radius: 3px; margin-top: 20px; }
     pre { white-space: pre-wrap; background: var(--zebra); padding: 14px; border-radius: 3px;
       font-size: 11.5px; font-family: var(--font-mono); margin-top: 16px; border: 1px solid var(--hairline); }
@@ -590,6 +641,7 @@ JOB_HTML = """
     {{ flowchart | safe }}
 
     <div id="qa-wrap"></div>
+    <div id="documents"></div>
     <div id="result"></div>
   </div>
 
@@ -610,6 +662,10 @@ JOB_HTML = """
 
     function applyStages(job) {
       const completed = new Set(job.completed_stages || []);
+      // A list, not one value: some stages now genuinely run at the same
+      // time (technical appendix alongside analysis, pdf alongside compact
+      // pdf), so more than one box can glow at once.
+      const active = new Set(job.active_stages || []);
       document.querySelectorAll(".fc-node[data-key]").forEach(el => {
         const key = el.dataset.key;
         if (key === "__blocked") {
@@ -619,7 +675,7 @@ JOB_HTML = """
         el.classList.remove("done", "current");
         if (completed.has(key)) {
           el.classList.add("done");
-        } else if (job.stage === key) {
+        } else if (active.has(key)) {
           el.classList.add("current");
         }
       });
@@ -640,6 +696,18 @@ JOB_HTML = """
       }
     }
 
+    function renderDocuments(job) {
+      const wrap = document.getElementById("documents");
+      const artifacts = Object.entries(job.artifacts || {});
+      if (!artifacts.length) {
+        wrap.innerHTML = "";
+        return;
+      }
+      wrap.innerHTML = `<div class="documents">${artifacts.map(([kind, item]) =>
+        `<a class="document-link" href="/document/${jobId}/${kind}" target="_blank" rel="noopener">${item.label} &nearr;</a>`
+      ).join("")}</div>`;
+    }
+
     async function poll() {
       const res = await fetch(`/api/job/${jobId}`);
       const job = await res.json();
@@ -647,6 +715,7 @@ JOB_HTML = """
       document.getElementById("status-pill").textContent = job.status;
       document.getElementById("status-pill").className = "tag tag-" + job.status;
       applyStages(job);
+      renderDocuments(job);
 
       if (job.started_at) {
         serverStartedAtMs = job.started_at * 1000;
@@ -666,8 +735,14 @@ JOB_HTML = """
 
       if (job.status === "done" && job.compact_pdf) {
         renderQa(job);
+        const artifacts = job.artifacts || {};
+        const previews = [];
+        if (artifacts.compact_pdf) previews.push(
+          `<section class="report-preview"><h2>Short report</h2><embed src="/document/${jobId}/compact_pdf" type="application/pdf"></section>`);
+        if (artifacts.full_pdf) previews.push(
+          `<section class="report-preview"><h2>Long report</h2><embed src="/document/${jobId}/full_pdf" type="application/pdf"></section>`);
         document.getElementById("result").innerHTML =
-          `<embed src="/pdf/${jobId}" type="application/pdf">`;
+          `<div class="report-previews">${previews.join("")}</div>`;
         return;
       }
       if (job.status === "failed") {

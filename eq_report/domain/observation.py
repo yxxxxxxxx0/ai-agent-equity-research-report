@@ -27,7 +27,6 @@ class SourceRef:
     original_source_name: str | None = None
     original_source_url: str | None = None
     original_publication_date: str | None = None
-    is_mock: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -40,7 +39,6 @@ class SourceRef:
             "original_source_name": self.original_source_name,
             "original_source_url": self.original_source_url,
             "original_publication_date": self.original_publication_date,
-            "is_mock": self.is_mock,
         }
 
 
@@ -127,7 +125,6 @@ class ProviderResult:
     passages: tuple[RawDocumentPassage, ...] = ()
     errors: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
-    is_mock: bool = False
     duration_ms: float = 0.0
 
     @property
@@ -143,6 +140,5 @@ class ProviderResult:
             "passage_count": len(self.passages),
             "errors": list(self.errors),
             "warnings": list(self.warnings),
-            "is_mock": self.is_mock,
             "duration_ms": round(self.duration_ms, 1),
         }

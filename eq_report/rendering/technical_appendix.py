@@ -239,17 +239,24 @@ def _caption(c: Canvas, x: float, y: float, width: float, text: str) -> None:
         c.drawString(x, y - index * 7.5, line)
 
 
-def append_technical_appendix(
-    report_pdf: Path,
-    output_pdf: Path,
+def build_technical_appendix_pdf(
     ticker: str,
     end_date: dt.date,
+    output_pdf: Path,
     *,
     page_label: str = "Page 1 of 1",
     credentials: ProviderCredentials | None = None,
     timeout: int = 30,
 ) -> Path:
-    """Fetch Bloomberg OHLCV from MegadataAPI, calculate indicators and append it."""
+    """Fetch Bloomberg OHLCV from MegadataAPI, calculate indicators and draw
+    the standalone appendix page - everything ``append_technical_appendix``
+    used to do except merging onto a base report.
+
+    Split out so the orchestrator can run this (a live network fetch plus a
+    chart render, independent of the report draft) concurrently with the
+    analysis stage, then merge it once the base PDF exists rather than
+    fetching it only after the report is otherwise finished.
+    """
     rows, source_label = _fetch_bloomberg_ohlcv(
         ticker, end_date, credentials or ProviderCredentials(), timeout=timeout,
     )
@@ -261,8 +268,7 @@ def append_technical_appendix(
     for i in range(1, len(close)): obv.append(obv[-1] + (volume[i] if close[i] > close[i-1] else -volume[i] if close[i] < close[i-1] else 0))
     rsi, vol10, vol20, vol30 = _rsi(close), _volatility(close, 10), _volatility(close, 20), _volatility(close, 30)
     keep = 90
-    appendix = output_pdf.with_suffix('.appendix.pdf')
-    c = Canvas(str(appendix), pagesize=A4); page_w, page_h = A4
+    c = Canvas(str(output_pdf), pagesize=A4); page_w, page_h = A4
     def header(page: int, subtitle: str):
         c.setFillColor(colors.HexColor('#12395e')); c.rect(0, page_h-52, page_w, 52, fill=1, stroke=0); c.setFillColor(colors.white); c.setFont('Helvetica-Bold', 15); c.drawString(42, page_h-31, f'Technical Appendix — {ticker}'); c.setFont('Helvetica', 8); c.drawRightString(page_w-42, page_h-31, page_label); c.setFillColor(colors.HexColor('#5c6470')); c.setFont('Helvetica', 7); c.drawString(42, page_h-66, subtitle)
     header(1, f'Last 90 trading days ending {dates[-1].isoformat()} · {source_label}')
@@ -305,10 +311,20 @@ def append_technical_appendix(
         f"Annualised realised volatility is {vol10[-1]:.1f}% / {vol20[-1]:.1f}% / {vol30[-1]:.1f}% for 10d / 20d / 30d. "
         "Use these signals for timing and risk context, not to validate the fundamental thesis."))
     c.save()
+    return output_pdf
+
+
+def merge_technical_appendix(report_pdf: Path, appendix_pdf: Path, output_pdf: Path) -> Path:
+    """Concatenate the base report and a pre-built appendix page.
+
+    Split from ``build_technical_appendix_pdf`` so the (slow, network-bound)
+    fetch-and-render step can run before the base report even exists; this
+    merge only needs both files to already be on disk.
+    """
     writer = PdfWriter()
-    for source in (report_pdf, appendix):
+    for source in (report_pdf, appendix_pdf):
         for page in PdfReader(str(source)).pages:
             writer.add_page(page)
-    with output_pdf.open('wb') as fh: writer.write(fh)
-    appendix.unlink(missing_ok=True)
+    with output_pdf.open('wb') as fh:
+        writer.write(fh)
     return output_pdf
