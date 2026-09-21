@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import math
 from pathlib import Path
+from typing import Any
 
 import requests
 from pypdf import PdfReader, PdfWriter
@@ -38,27 +39,45 @@ def _fetch_bloomberg_ohlcv(
         auth = (credentials.megadata_username, credentials.megadata_password)
     elif credentials.megadata_api_key:
         headers["Authorization"] = f"Bearer {credentials.megadata_api_key}"
+
     # Report dates are interpreted in Asia/Shanghai by the application while
-    # Bloomberg daily bars close on the U.S. market calendar.  Query through
-    # the prior calendar day; weekends/holidays naturally resolve to the most
-    # recent available session, whose actual date is printed on the chart.
+    # Bloomberg daily bars close on the U.S. market calendar. MegadataAPI does
+    # not clip a weekend/holiday `to_date` down to the last real session
+    # itself - it errors with "no data" instead (confirmed live: a Sunday
+    # to_date fails for every ticker, the same query with a Friday to_date
+    # succeeds). So this steps `to_date` back one calendar day at a time -
+    # covering weekends and market holidays alike, not just Saturday/Sunday -
+    # until MegadataAPI actually returns data, rather than assuming a fixed
+    # one-day offset is always a trading day.
     market_end_date = end_date - dt.timedelta(days=1)
-    response = requests.get(
-        url,
-        params={
-            "symbols": ticker,
-            "from_date": (end_date - dt.timedelta(days=370)).isoformat(),
-            "to_date": market_end_date.isoformat(),
-        },
-        headers=headers,
-        auth=auth,
-        timeout=timeout,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    block = payload.get(ticker) if isinstance(payload, dict) else payload
-    if isinstance(block, dict) and block.get("error"):
-        raise ValueError(f"Megadata Bloomberg OHLCV unavailable for {ticker}: {block['error']}")
+    block: Any = None
+    last_error: str | None = None
+    for _ in range(10):
+        response = requests.get(
+            url,
+            params={
+                "symbols": ticker,
+                "from_date": (end_date - dt.timedelta(days=370)).isoformat(),
+                "to_date": market_end_date.isoformat(),
+            },
+            headers=headers,
+            auth=auth,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        candidate = payload.get(ticker) if isinstance(payload, dict) else payload
+        if isinstance(candidate, dict) and candidate.get("error"):
+            last_error = candidate["error"]
+            market_end_date -= dt.timedelta(days=1)
+            continue
+        block = candidate
+        break
+    else:
+        raise ValueError(
+            f"Megadata Bloomberg OHLCV unavailable for {ticker} across the last 10 "
+            f"calendar days tried; last error: {last_error}"
+        )
     records = block.get("data", block.get("results", block)) if isinstance(block, dict) else block
     if isinstance(records, dict):
         # Some deployments return date-keyed dictionaries.
