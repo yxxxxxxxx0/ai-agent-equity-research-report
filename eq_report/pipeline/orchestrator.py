@@ -469,6 +469,17 @@ def _finish_with_usage(
         total_cost_usd=round(usage_summary.get("total_cost_usd", 0.0), 4),
         calls_missing_cost=usage_summary.get("calls_missing_cost", 0),
     )
+    # One line per stage, cheapest last, so the terminal shows where the run's
+    # cost actually went without needing to open the run manifest.
+    by_stage = usage_summary.get("by_stage") or {}
+    for stage, row in sorted(by_stage.items(), key=lambda kv: -kv[1].get("cost_usd", 0.0)):
+        log_event(
+            logger, logging.INFO, f"LLM cost [{stage}]",
+            calls=row.get("calls", 0),
+            input_tokens=row.get("input_tokens", 0),
+            output_tokens=row.get("output_tokens", 0),
+            cost_usd=round(row.get("cost_usd", 0.0), 4),
+        )
     return run, manifest
 
 

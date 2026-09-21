@@ -22,6 +22,7 @@ the desk behind the printed note rather than an unrelated admin panel.
 
 from __future__ import annotations
 
+import contextvars
 import datetime as dt
 import json
 import os
@@ -71,6 +72,7 @@ _load_dotenv(REPO_ROOT / ".env")
 from eq_report.config import Settings  # noqa: E402 (must follow dotenv load)
 from eq_report.domain.request import ResearchRequest  # noqa: E402
 from eq_report.logging_setup import configure_logging  # noqa: E402
+from eq_report.llm import usage as usage_module  # noqa: E402
 from eq_report.pipeline import run_tracker as run_tracker_module  # noqa: E402
 from eq_report.pipeline.orchestrator import generate_report_sync  # noqa: E402
 
@@ -120,6 +122,12 @@ def _tracked_stage(self, name):  # noqa: ANN001 - mirrors RunTracker.stage's sig
             if job is not None:
                 job.setdefault("active_stages", []).append(name)
                 job["stage_started_at"] = time.time()
+                # Recorded once, never overwritten: a client computing "how
+                # long has this stage been running" from this timestamp gets
+                # the same answer before and after a page refresh, unlike a
+                # client-side Date.now() captured at first render, which a
+                # refresh would reset to "just started".
+                job.setdefault("stage_first_started_at", {}).setdefault(name, job["stage_started_at"])
     try:
         with _orig_stage(self, name) as timing:
             yield timing
@@ -133,15 +141,57 @@ def _tracked_stage(self, name):  # noqa: ANN001 - mirrors RunTracker.stage's sig
                         active.remove(name)
                     if name not in job["completed_stages"]:
                         job["completed_stages"].append(name)
+                    job.setdefault("stage_completed_at", {})[name] = time.time()
 
 
 run_tracker_module.RunTracker.stage = _tracked_stage
+
+# -- live cost/token tracking, without touching the pipeline itself -------
+# UsageTracker.record() runs inside asyncio.to_thread worker threads (see
+# eq_report/llm/usage.py's own docstring), which do NOT share a thread
+# identity with the _run_job thread that _THREAD_JOB above is keyed by - so
+# this uses a contextvars.ContextVar instead, which asyncio.to_thread
+# explicitly propagates into the worker thread's context. Every completed
+# LLM call updates the job dict immediately, so cost/tokens climb live
+# instead of only appearing once the whole run finishes.
+_JOB_CTX: contextvars.ContextVar[str | None] = contextvars.ContextVar("_webui_job_id", default=None)
+_orig_record = usage_module.UsageTracker.record
+
+
+def _tracked_record(self, event):  # noqa: ANN001 - mirrors UsageTracker.record's signature
+    _orig_record(self, event)
+    job_id = _JOB_CTX.get()
+    if not job_id:
+        return
+    with _JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            return
+        job["cost_usd"] = round((job.get("cost_usd") or 0.0) + (event.cost_usd or 0.0), 6)
+        job["input_tokens"] = (job.get("input_tokens") or 0) + event.input_tokens
+        job["output_tokens"] = (job.get("output_tokens") or 0) + event.output_tokens
+        job["call_count"] = (job.get("call_count") or 0) + 1
+        row = job.setdefault("usage_by_stage", {}).setdefault(event.stage, {
+            "calls": 0, "input_tokens": 0, "output_tokens": 0,
+            "cost_usd": 0.0, "calls_missing_cost": 0,
+        })
+        row["calls"] += 1
+        row["input_tokens"] += event.input_tokens
+        row["output_tokens"] += event.output_tokens
+        if event.cost_usd is not None:
+            row["cost_usd"] = round(row["cost_usd"] + event.cost_usd, 6)
+        else:
+            row["calls_missing_cost"] += 1
+
+
+usage_module.UsageTracker.record = _tracked_record
 
 configure_logging("INFO")  # lock in handlers now so per-run calls don't reset them
 
 
 def _run_job(job_id: str, ticker: str, report_date: dt.date) -> None:
     _THREAD_JOB[threading.get_ident()] = job_id
+    _JOB_CTX.set(job_id)
     with _JOBS_LOCK:
         JOBS[job_id]["status"] = "running"
         JOBS[job_id]["started_at"] = time.time()
@@ -187,6 +237,7 @@ def _run_job(job_id: str, ticker: str, report_date: dt.date) -> None:
                 call_count=usage.get("call_count"),
                 input_tokens=usage.get("total_input_tokens"),
                 output_tokens=usage.get("total_output_tokens"),
+                usage_by_stage=usage.get("by_stage") or {},
                 qa_critical=len(qa.critical) if qa else None,
                 qa_warnings=len(qa.warnings) if qa else None,
                 qa_reasons=qa_reasons,
@@ -488,6 +539,18 @@ APP_STYLE = """
     @media (prefers-reduced-motion: reduce) {
       .fc-node.current, .fc-node.fc-blocked.active { animation: none; }
     }
+    .fc-cost {
+      position: absolute; top: -9px; right: -8px; background: var(--navy); color: #fff;
+      font-family: var(--font-mono); font-size: 10px; font-weight: 700; padding: 2px 6px;
+      border-radius: 99px; line-height: 1.3; box-shadow: 0 1px 2px rgba(16,24,40,0.25);
+    }
+
+    /* Overall telemetry - elapsed/cost/tokens, anchored to server timestamps
+       (see updateTelemetry) so a refresh never resets the clock. */
+    .telemetry { display: flex; gap: 22px; margin: -6px 0 22px; flex-wrap: wrap; }
+    .t-item { display: flex; align-items: baseline; gap: 6px; }
+    .t-k { font-size: 10.5px; font-weight: 700; color: var(--faint); text-transform: uppercase; letter-spacing: 0.06em; }
+    .t-v { font-size: 15px; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
 """
 
 # Absolute-positioned nodes + an SVG line layer, laid out to match the
@@ -547,53 +610,53 @@ FLOWCHART_HTML = """
     <text x="480" y="515" style="font:700 9.5px var(--font-ui);fill:var(--neg-ink);">critical findings</text>
   </svg>
 
-  <div class="fc-node" data-key="planning" style="left:240px;top:16px;width:200px;height:56px;">
+  <div class="fc-node" data-key="planning" data-node="planning" style="left:240px;top:16px;width:200px;height:56px;">
     <div class="fc-name">Planning</div><div class="fc-blurb">Scope the research plan</div>
   </div>
 
-  <div class="fc-node" data-key="acquisition" style="left:40px;top:100px;width:190px;height:60px;">
+  <div class="fc-node" data-key="acquisition" data-node="market_data" style="left:40px;top:100px;width:190px;height:60px;">
     <div class="fc-name">Market data</div><div class="fc-blurb">Price, cap, multiples</div>
   </div>
-  <div class="fc-node" data-key="acquisition" style="left:245px;top:100px;width:190px;height:60px;">
+  <div class="fc-node" data-key="acquisition" data-node="fundamentals_data" style="left:245px;top:100px;width:190px;height:60px;">
     <div class="fc-name">Fundamentals</div><div class="fc-blurb">Financials &amp; KPIs</div>
   </div>
-  <div class="fc-node" data-key="acquisition" style="left:450px;top:100px;width:190px;height:60px;">
+  <div class="fc-node" data-key="acquisition" data-node="documents_data" style="left:450px;top:100px;width:190px;height:60px;">
     <div class="fc-name">Documents</div><div class="fc-blurb">Filings, news, transcripts</div>
   </div>
 
-  <div class="fc-node" data-key="normalisation" style="left:240px;top:186px;width:200px;height:56px;">
+  <div class="fc-node" data-key="normalisation" data-node="normalisation" style="left:240px;top:186px;width:200px;height:56px;">
     <div class="fc-name">Normalisation</div><div class="fc-blurb">Reconcile into canonical facts</div>
   </div>
 
-  <div class="fc-node" data-key="evidence_ingestion" style="left:240px;top:270px;width:200px;height:56px;">
+  <div class="fc-node" data-key="evidence_ingestion" data-node="evidence_store" style="left:240px;top:270px;width:200px;height:56px;">
     <div class="fc-name">Evidence store</div><div class="fc-blurb">Canonical facts, written</div>
   </div>
 
-  <div class="fc-node" data-key="analysis" style="left:40px;top:354px;width:190px;height:60px;">
+  <div class="fc-node" data-key="analysis" data-node="analytics_engine" style="left:40px;top:354px;width:190px;height:60px;">
     <div class="fc-name">Analytics engine</div><div class="fc-blurb">Growth, mix, surprise</div>
   </div>
-  <div class="fc-node" data-key="analysis" style="left:245px;top:354px;width:190px;height:60px;">
+  <div class="fc-node" data-key="analysis" data-node="segment_agents" style="left:245px;top:354px;width:190px;height:60px;">
     <div class="fc-name">Segment agents</div><div class="fc-blurb">Per-section research</div>
   </div>
-  <div class="fc-node" data-key="technical_appendix" style="left:450px;top:354px;width:190px;height:60px;">
+  <div class="fc-node" data-key="technical_appendix" data-node="technical_appendix" style="left:450px;top:354px;width:190px;height:60px;">
     <div class="fc-name">Technical appendix</div><div class="fc-blurb">Live OHLCV chart, independent of the draft</div>
   </div>
 
-  <div class="fc-node" data-key="synthesis" style="left:240px;top:440px;width:200px;height:56px;">
+  <div class="fc-node" data-key="synthesis" data-node="synthesis" style="left:240px;top:440px;width:200px;height:56px;">
     <div class="fc-name">Synthesis</div><div class="fc-blurb">Draft narrative &amp; exhibits</div>
   </div>
 
-  <div class="fc-node fc-gate" data-key="qa" style="left:240px;top:524px;width:200px;height:56px;">
+  <div class="fc-node fc-gate" data-key="qa" data-node="qa_gate" style="left:240px;top:524px;width:200px;height:56px;">
     <div class="fc-name">QA gate</div><div class="fc-blurb">Check every claim vs. evidence</div>
   </div>
   <div class="fc-node fc-blocked" data-key="__blocked" style="left:480px;top:524px;width:170px;height:56px;">
     <div class="fc-name">Blocked</div><div class="fc-blurb">No PDF - fixes required</div>
   </div>
 
-  <div class="fc-node" data-key="pdf" style="left:50px;top:620px;width:280px;height:60px;">
+  <div class="fc-node" data-key="pdf" data-node="pdf" style="left:50px;top:620px;width:280px;height:60px;">
     <div class="fc-name">Render PDF</div><div class="fc-blurb">Full report, merged with the technical appendix</div>
   </div>
-  <div class="fc-node" data-key="compact_pdf" style="left:350px;top:620px;width:280px;height:60px;">
+  <div class="fc-node" data-key="compact_pdf" data-node="compact_pdf" style="left:350px;top:620px;width:280px;height:60px;">
     <div class="fc-name">Compact PDF</div><div class="fc-blurb">Two-page short version</div>
   </div>
 </div></div>
@@ -613,6 +676,12 @@ APP_HTML = """
     <div class="topbar">
       <div></div>
       <div class="tagline-top">Faster insights. Deeper decisions.</div>
+    </div>
+
+    <div class="telemetry">
+      <div class="t-item"><span class="t-k">Elapsed</span><span class="t-v" id="t-elapsed">&mdash;</span></div>
+      <div class="t-item"><span class="t-k">LLM cost</span><span class="t-v" id="t-cost">$0.00</span></div>
+      <div class="t-item"><span class="t-k">Tokens</span><span class="t-v" id="t-tokens">&mdash;</span></div>
     </div>
 
     <div class="layout">
@@ -675,15 +744,26 @@ APP_HTML = """
                                             for key, title, desc, stages in STEP_GROUPS]) + """;
     let jobId = """ + "{{ initial_job_id | tojson }}" + """;
     let viewerMode = "full";
-    let stepStartedAt = {};
     let pollTimer = null;
     let tickTimer = null;
+
+    // Every timestamp driving the UI's clocks comes from the server
+    // (job.started_at, job.stage_first_started_at, job.stage_completed_at -
+    // all wall-clock seconds recorded once, server-side, the first time each
+    // stage starts). A tick just recomputes Date.now() - <server time>, so
+    // refreshing the page mid-run shows the same true elapsed time instead
+    // of restarting every clock at 0.
+    function groupStartMs(job, stages) {
+      if (!job || !job.stage_first_started_at) return null;
+      const times = stages.map(s => job.stage_first_started_at[s]).filter(t => t != null);
+      return times.length ? Math.min(...times) * 1000 : null;
+    }
 
     function renderSteps(job) {
       const completed = new Set((job && job.completed_stages) || []);
       const active = new Set((job && job.active_stages) || []);
       const done = job && (job.status === "done" || job.status === "failed");
-      const html = STEP_GROUPS.map((group, index) => {
+      const html = STEP_GROUPS.map((group) => {
         const [key, title, desc, stages] = group;
         const isCurrent = !done && stages.length > 0 && stages.some(s => active.has(s));
         const groupDone = stages.length > 0 && stages.every(s => completed.has(s));
@@ -692,14 +772,16 @@ APP_HTML = """
         const finalizingCurrent = isFinalizing && !done && job && job.status === "running"
           && STEP_GROUPS.slice(0, -1).every(g => g[3].every(s => completed.has(s)));
         const cls = (groupDone || finalizingDone) ? "done" : (isCurrent || finalizingCurrent) ? "current" : "";
-        if ((isCurrent || finalizingCurrent) && !stepStartedAt[key]) stepStartedAt[key] = Date.now();
-        const showTime = cls === "current" && stepStartedAt[key];
+        const startMs = isFinalizing
+          ? ((job && job.stage_completed_at && job.stage_completed_at.compact_pdf) || null) * 1000 || null
+          : groupStartMs(job, stages);
+        const showTime = cls === "current" && startMs;
         return `<div class="step ${cls}" data-key="${key}">
           <div class="step-dot"></div>
           <div class="step-body">
             <div class="step-title-row">
               <span class="step-title">${title}</span>
-              <span class="step-time" data-key="${key}">${showTime ? fmtSecs(Date.now() - stepStartedAt[key]) : ""}</span>
+              <span class="step-time" data-key="${key}">${showTime ? fmtSecs(Date.now() - startMs) : ""}</span>
             </div>
             <div class="step-desc">${desc}</div>
           </div>
@@ -726,18 +808,73 @@ APP_HTML = """
       });
     }
 
+    // Which usage_by_stage keys (see llm/usage.py's per-stage breakdown)
+    // belong to each visual node, once the run is done. Nodes with no LLM
+    // call in their stage (acquisition, evidence store, technical appendix,
+    // PDF rendering) are left without a badge rather than shown as "$0.00"
+    // everywhere, which would just be noise.
+    const NODE_STAGE_MATCH = {
+      planning: s => s === "planning",
+      normalisation: s => s === "normalisation" || s.startsWith("normalisation:"),
+      analytics_engine: s => s === "analytics",
+      segment_agents: s => s.startsWith("agent:"),
+      synthesis: s => s === "synthesis" || s === "synthesis_body",
+      qa_gate: s => s === "qa" || s.startsWith("qa_") || s.startsWith("qa:"),
+    };
+
+    function renderCostByLayer(job) {
+      document.querySelectorAll(".fc-cost").forEach(el => el.remove());
+      const byStage = (job && job.usage_by_stage) || {};
+      if (!Object.keys(byStage).length) return;
+      document.querySelectorAll(".fc-node[data-node]").forEach(node => {
+        const match = NODE_STAGE_MATCH[node.dataset.node];
+        if (!match) return;
+        const cost = Object.entries(byStage)
+          .filter(([stage]) => match(stage))
+          .reduce((sum, [, row]) => sum + (row.cost_usd || 0), 0);
+        if (cost <= 0) return;
+        node.style.position = "absolute"; // already true, kept explicit for the badge's anchor
+        const badge = document.createElement("div");
+        badge.className = "fc-cost";
+        badge.textContent = "$" + cost.toFixed(2);
+        node.appendChild(badge);
+      });
+    }
+
     function fmtSecs(ms) {
       return Math.max(0, Math.round(ms / 1000)) + "s";
     }
 
     function tickTimes() {
+      const job = window.__lastJob || null;
       document.querySelectorAll(".step-time[data-key]").forEach(el => {
         const key = el.dataset.key;
         const row = el.closest(".step");
-        if (row.classList.contains("current") && stepStartedAt[key]) {
-          el.textContent = fmtSecs(Date.now() - stepStartedAt[key]);
-        }
+        if (!row.classList.contains("current")) return;
+        const group = STEP_GROUPS.find(g => g[0] === key);
+        if (!group) return;
+        const startMs = key === "finalizing"
+          ? ((job && job.stage_completed_at && job.stage_completed_at.compact_pdf) || null) * 1000 || null
+          : groupStartMs(job, group[3]);
+        if (startMs) el.textContent = fmtSecs(Date.now() - startMs);
       });
+      updateTelemetry(job);
+    }
+
+    function updateTelemetry(job) {
+      const elapsedEl = document.getElementById("t-elapsed");
+      const costEl = document.getElementById("t-cost");
+      const tokensEl = document.getElementById("t-tokens");
+      if (!elapsedEl) return;
+      if (job && job.started_at) {
+        const endMs = job.duration_ms != null ? (job.started_at * 1000 + job.duration_ms) : Date.now();
+        elapsedEl.textContent = fmtSecs(endMs - job.started_at * 1000);
+      } else {
+        elapsedEl.textContent = "—";
+      }
+      costEl.textContent = job && job.cost_usd != null ? "$" + job.cost_usd.toFixed(2) : "$0.00";
+      const total = job ? (job.input_tokens || 0) + (job.output_tokens || 0) : 0;
+      tokensEl.textContent = total ? total.toLocaleString() : "—";
     }
 
     function selectViewer(mode) {
@@ -813,11 +950,13 @@ APP_HTML = """
       renderSteps(job);
       applyFlowchart(job);
       renderViewer(job);
+      updateTelemetry(job);
       const btn = document.getElementById("generate-btn");
       if (job.ticker) document.getElementById("ticker").value = job.ticker;
 
       if (job.status === "done" || job.status === "failed") {
         btn.disabled = false;
+        renderCostByLayer(job);
         clearTimeout(pollTimer);
         return;
       }
