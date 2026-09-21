@@ -58,11 +58,34 @@ _DATASETS = (
     DatasetRequirement("market_data", ("ohlcv", "price", "market_cap", "adv", "returns", "volatility"),
                        ("/api/bbg/ohlcv/data", "/api/bbg/market-cap/data", "/api/market/bbg/data", "/api/market/tradestation/ohlcuvdv"),
                        "Measure company and benchmark performance, liquidity and positioning", 1),
+    # /api/bbg/indicators/data was previously listed here and in
+    # segments_and_kpis below - confirmed via this deployment's own
+    # /openapi.json (2026-09-21) that it fetches from the `indicator`
+    # ArcticDB library (example fields: RSI, MACD) - technical/price
+    # indicators, not financial-statement data. The planner was faithfully
+    # requesting the wrong endpoint for revenue/EPS/margins every run, which
+    # is why financial_performance/company_snapshot/operating_drivers came
+    # back with "no reported period" despite the request succeeding:
+    # reported actuals were never in the response to begin with. The full
+    # documented endpoint list has no dedicated reported-actuals route
+    # (income-statement/financials/fundamentals/balance-sheet/etc. are all
+    # unregistered - a generic 405, not a real route), and
+    # /api/news/filings-by-form only returns filing metadata (accession,
+    # form, file_url) - not the filing's body text.
+    # /api/alpha-vantage/earning-call-transcripts is the one endpoint
+    # confirmed to carry the actual reported figures in prose (verified
+    # live: NVIDIA's CFO stating "revenue of $57 billion, up 62% year over
+    # year" in a real transcript turn) - it is already fetched into document
+    # evidence via company_narrative_events below, but nothing yet extracts
+    # a canonical numeric fact from that text. That extraction is the
+    # remaining piece, not yet built.
     DatasetRequirement("financial_fundamentals", ("revenue", "eps", "margins", "ebit", "ebitda", "ocf", "fcf", "capex", "balance_sheet"),
-                       ("/api/bbg/indicators/data", "/api/news/filings-by-form"),
-                       "Measure results, history and cash conversion with filing verification", 1),
+                       ("/api/news/filings-by-form", "/api/alpha-vantage/earning-call-transcripts"),
+                       "Measure results, history and cash conversion from filing metadata and "
+                       "earnings-call transcript text - no structured reported-actuals endpoint "
+                       "is currently known on this MegadataAPI deployment", 1),
     DatasetRequirement("segments_and_kpis", ("segment_revenue", "growth", "mix", "units", "asp", "bookings", "backlog"),
-                       ("/api/bbg/segment-revenue/data", "/api/bbg/indicators/data"),
+                       ("/api/bbg/segment-revenue/data",),
                        "Identify the economic and operating drivers of reported changes", 1),
     DatasetRequirement("expectations", ("consensus", "high", "low", "median", "estimate_count", "revisions"),
                        ("/api/bbg/estimates/data",), "Compare actuals, guidance and changing market expectations", 1),

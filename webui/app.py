@@ -23,6 +23,7 @@ the desk behind the printed note rather than an unrelated admin panel.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import sys
 import threading
@@ -206,11 +207,23 @@ def _run_job(job_id: str, ticker: str, report_date: dt.date) -> None:
         _THREAD_JOB.pop(threading.get_ident(), None)
 
 
+def _start_job(ticker: str, report_date: dt.date) -> str:
+    job_id = uuid.uuid4().hex[:8]
+    with _JOBS_LOCK:
+        JOBS[job_id] = {
+            "ticker": ticker,
+            "report_date": report_date.isoformat(),
+            "status": "queued",
+            "active_stages": [],
+            "completed_stages": [],
+        }
+    threading.Thread(target=_run_job, args=(job_id, ticker, report_date), daemon=True).start()
+    return job_id
+
+
 @app.route("/", methods=["GET"])
 def index():
-    jobs = list(reversed(list(JOBS.items())))
-    return render_template_string(
-        INDEX_HTML, jobs=jobs, today=dt.date.today().isoformat(), flowchart=FLOWCHART_HTML)
+    return render_template_string(APP_HTML, initial_job_id=None)
 
 
 @app.route("/generate", methods=["POST"])
@@ -223,28 +236,30 @@ def generate():
         report_date = dt.date.fromisoformat(date_str) if date_str else dt.date.today()
     except ValueError:
         report_date = dt.date.today()
-
-    job_id = uuid.uuid4().hex[:8]
-    with _JOBS_LOCK:
-        JOBS[job_id] = {
-            "ticker": ticker,
-            "report_date": report_date.isoformat(),
-            "status": "queued",
-            "active_stages": [],
-            "completed_stages": [],
-        }
-    threading.Thread(target=_run_job, args=(job_id, ticker, report_date), daemon=True).start()
+    job_id = _start_job(ticker, report_date)
     return redirect(url_for("job_page", job_id=job_id))
+
+
+@app.route("/api/generate", methods=["POST"])
+def api_generate():
+    payload = request.get_json(silent=True) or {}
+    ticker = str(payload.get("ticker", "")).strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+    date_str = str(payload.get("report_date", "")).strip()
+    try:
+        report_date = dt.date.fromisoformat(date_str) if date_str else dt.date.today()
+    except ValueError:
+        report_date = dt.date.today()
+    job_id = _start_job(ticker, report_date)
+    return jsonify({"job_id": job_id})
 
 
 @app.route("/job/<job_id>", methods=["GET"])
 def job_page(job_id: str):
-    job = JOBS.get(job_id)
-    if job is None:
+    if job_id not in JOBS:
         return "Unknown job.", 404
-    return render_template_string(
-        JOB_HTML, job_id=job_id, job=job, stages=STAGES, stage_keys=STAGE_KEYS,
-        flowchart=FLOWCHART_HTML)
+    return render_template_string(APP_HTML, initial_job_id=job_id)
 
 
 @app.route("/api/job/<job_id>", methods=["GET"])
@@ -278,495 +293,364 @@ def job_document(job_id: str, kind: str):
 
 
 # -- visual system --------------------------------------------------------
-# Lifted directly from eq_report/rendering/pdf_renderer.py's own palette
-# (ACCENT/POS/NEG/WARN/INK/...) so the control room shares one identity
-# with the document it produces, rather than wearing a separate "app" skin.
-BASE_STYLE = """
+# "EquityAI" shell: ticker input -> live step tracker -> report viewer,
+# matching the product mockup the user supplied. Real wiring throughout -
+# the five steps below are grouped from the pipeline's own tracked stages
+# (see STAGE_KEYS/_tracked_stage above), not decorative placeholders, and
+# the two report-viewer toggle buttons point at the two PDFs the pipeline
+# actually produces (full_pdf/compact_pdf in job["artifacts"]).
+STEP_GROUPS: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
+    ("ingest", "Fetching company data", "Financials, filings, news, and market data...",
+     ("planning", "acquisition", "normalisation", "evidence_ingestion")),
+    ("analyze", "Analyzing with AI", "Identifying key insights...",
+     ("analysis", "technical_appendix")),
+    ("full_report", "Building full report", "Writing comprehensive analysis...",
+     ("synthesis", "qa", "pdf")),
+    ("compact_report", "Building compact report", "Creating executive summary...",
+     ("compact_pdf",)),
+    ("finalizing", "Finalizing", "Almost there...", ()),
+)
+
+APP_STYLE = """
     :root {
-      --ink: #1a1a1a; --ink-soft: #3a3f47; --muted: #5c6470; --faint: #8993a1;
-      --rule: #c8ccd4; --hairline: #e6e9ee; --paper: #ffffff; --band: #eef1f5;
-      --zebra: #f5f7fa;
-      --accent: #12395e; --accent-soft: #e4ebf2; --accent-line: #9db6cc;
-      --warn-bg: #fdf3e0; --warn-border: #d99a2b; --warn-ink: #7a4a00;
-      --neg-bg: #fbe9e7; --neg-border: #c1442e; --neg-ink: #7a2a1a;
-      --pos: #2f6f5e; --pos-bg: #e9f3f0;
+      --page-bg: #eef1f6; --card-bg: #ffffff; --border: #e4e8f0;
+      --ink: #12172b; --ink-soft: #3d4459; --muted: #6b7280; --faint: #9aa2b1;
+      --navy: #0f1b33; --blue: #2f5fff; --blue-soft: #eaf0ff; --blue-ring: #c7d7ff;
+      --step-line: #e4e8f0;
       --font-ui: -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
       --font-mono: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
     }
     * { box-sizing: border-box; }
     body {
-      font-family: var(--font-ui); margin: 0; color: var(--ink); background: var(--paper);
+      font-family: var(--font-ui); margin: 0; color: var(--ink); background: var(--page-bg);
       -webkit-font-smoothing: antialiased;
     }
-    a { color: var(--accent); }
-    /* 712px content column: wide enough that the 680px-wide workflow chart
-       never triggers a scrollbar at a normal desktop width. */
-    .wrap { max-width: 760px; margin: 0 auto; padding: 0 24px 64px; }
+    .shell { max-width: 1180px; margin: 0 auto; padding: 36px 28px 56px; }
 
-    /* Masthead - the same idea as the report's own masthead band */
-    .masthead {
-      background: var(--accent); color: #eaf0f6; padding: 20px 24px;
-      margin-bottom: 34px; border-bottom: 3px solid var(--accent-line);
-    }
-    .masthead .wrap { padding: 0; display: flex; align-items: baseline; justify-content: space-between; }
-    .masthead .mark {
-      font-size: 10.5px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase;
-      color: #9db6cc;
-    }
-    .masthead h1 { font-size: 23px; margin: 3px 0 0; font-weight: 700; letter-spacing: -0.015em; color: #fff; }
-    .masthead a.back { color: #cfdcea; text-decoration: none; font-size: 12px; font-weight: 600; }
-    .masthead a.back:hover { color: #fff; }
+    .topbar { display: flex; align-items: flex-end; justify-content: space-between;
+      margin-bottom: 28px; flex-wrap: wrap; gap: 10px; }
+    .wordmark { font-size: 30px; font-weight: 800; letter-spacing: -0.01em; }
+    .wordmark .hl { color: var(--blue); }
+    .tagline-top { color: var(--muted); font-size: 13.5px; }
+    .subtitle { color: var(--muted); font-size: 14px; margin-top: 2px; }
 
-    .lede { color: var(--muted); font-size: 13.5px; margin: 0 0 26px; line-height: 1.5; }
+    .layout { display: grid; grid-template-columns: 380px 1fr; gap: 22px; align-items: start; }
+    @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
 
-    .panel {
-      background: var(--paper); border: 1px solid var(--hairline); border-radius: 3px;
-      padding: 20px 22px; margin-bottom: 20px;
+    .card {
+      background: var(--card-bg); border: 1px solid var(--border); border-radius: 14px;
+      padding: 22px 22px 24px; box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
     }
-    .panel + .panel { margin-top: -2px; }
+    .card + .card { margin-top: 18px; }
+    .card h2 { font-size: 16px; font-weight: 700; margin: 0 0 4px; color: var(--ink); }
+    .card .hint { color: var(--muted); font-size: 13px; margin: 0 0 16px; line-height: 1.4; }
 
-    label {
-      display: block; margin-top: 16px; font-size: 10.5px; font-weight: 700;
-      color: var(--faint); text-transform: uppercase; letter-spacing: 0.08em;
+    .ticker-row { display: flex; gap: 10px; }
+    .ticker-field {
+      flex: 1; display: flex; align-items: center; gap: 8px; border: 1px solid var(--border);
+      border-radius: 9px; padding: 0 12px; background: #fbfcfe;
     }
-    input {
-      font-size: 15px; padding: 9px 10px; border: 1px solid var(--rule); border-radius: 3px;
-      width: 100%; margin-top: 7px; background: var(--zebra); color: var(--ink);
-      font-variant-numeric: tabular-nums;
+    .ticker-field svg { flex: none; color: var(--faint); }
+    .ticker-field input {
+      border: none; background: transparent; padding: 12px 0; font-size: 15px;
+      font-weight: 700; letter-spacing: 0.02em; text-transform: uppercase; width: 100%;
+      color: var(--ink); font-family: var(--font-ui);
     }
-    input:focus { outline: none; border-color: var(--accent); background: var(--paper);
-      box-shadow: 0 0 0 3px var(--accent-soft); }
-    button {
-      margin-top: 22px; background: var(--accent); color: #fff; border: none;
-      padding: 11px 20px; border-radius: 3px; font-size: 13.5px; font-weight: 600;
-      letter-spacing: 0.01em; cursor: pointer;
-      transition: transform 120ms cubic-bezier(0.23,1,0.32,1), background 120ms;
-    }
-    button:hover { background: #0d2c47; }
-    button:active { transform: scale(0.97); }
+    .ticker-field input:focus { outline: none; }
+    .ticker-field input::placeholder { color: var(--faint); font-weight: 600; }
 
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th {
-      text-align: left; padding: 7px 9px; color: var(--faint); font-weight: 700;
-      font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em;
-      border-bottom: 1.5px solid var(--accent);
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px; border: none; border-radius: 9px;
+      font-size: 14px; font-weight: 700; cursor: pointer; white-space: nowrap;
+      font-family: var(--font-ui); transition: background 120ms, opacity 120ms, transform 120ms;
     }
-    td { padding: 9px; border-bottom: 1px solid var(--hairline); font-variant-numeric: tabular-nums; }
-    tr:last-child td { border-bottom: none; }
-    tbody tr:nth-child(even) td { background: var(--zebra); }
+    .btn:active { transform: scale(0.97); }
+    .btn-primary { background: var(--navy); color: #fff; padding: 12px 18px; }
+    .btn-primary:hover { background: #1b2947; }
+    .btn-primary:disabled { opacity: 0.55; cursor: default; transform: none; }
+    .btn-toggle {
+      background: #fff; color: var(--ink-soft); border: 1px solid var(--border);
+      padding: 9px 14px;
+    }
+    .btn-toggle.active { background: var(--navy); color: #fff; border-color: var(--navy); }
+    .toggle-group { display: flex; gap: 8px; }
 
-    .tag {
-      display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px 2px 7px;
-      border-radius: 99px; font-size: 10.5px; font-weight: 700; text-transform: uppercase;
-      letter-spacing: 0.05em; white-space: nowrap;
-    }
-    .tag::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-    .tag-done, .tag-succeeded { background: var(--pos-bg); color: var(--pos); }
-    .tag-failed, .tag-failed_qa { background: var(--neg-bg); color: var(--neg-ink); }
-    .tag-running, .tag-queued { background: var(--warn-bg); color: var(--warn-ink); }
+    .example-hint { color: var(--faint); font-size: 12.5px; margin-top: 12px; }
 
-    .panel-title { font-size: 11px; font-weight: 700; color: var(--faint);
-      text-transform: uppercase; letter-spacing: 0.07em; margin: 0 0 12px; }
+    /* Step tracker */
+    .steps { position: relative; }
+    .step { position: relative; display: flex; gap: 14px; padding-bottom: 22px; }
+    .step:last-child { padding-bottom: 0; }
+    .step::before {
+      content: ""; position: absolute; left: 10px; top: 24px; bottom: -2px; width: 2px;
+      background: var(--step-line);
+    }
+    .step:last-child::before { display: none; }
+    .step-dot {
+      flex: none; width: 21px; height: 21px; border-radius: 50%; margin-top: 1px;
+      border: 2px solid var(--border); background: #fff; position: relative; z-index: 1;
+      display: flex; align-items: center; justify-content: center;
+      transition: border-color 160ms, background 160ms;
+    }
+    .step-dot::after {
+      content: ""; width: 9px; height: 9px; border-radius: 50%; background: transparent;
+      transition: background 160ms;
+    }
+    .step.current .step-dot { border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-ring); }
+    .step.current .step-dot::after { background: var(--blue); }
+    .step.done .step-dot { border-color: var(--blue); background: var(--blue); }
+    .step.done .step-dot::after {
+      background: transparent; width: 10px; height: 7px; border-radius: 0;
+      border-left: 2px solid #fff; border-bottom: 2px solid #fff; transform: rotate(-45deg) translate(1px, -1px);
+    }
+    .step-body { flex: 1; padding-top: 0; }
+    .step-title-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+    .step-title { font-size: 14.5px; font-weight: 700; color: var(--faint); transition: color 160ms; }
+    .step.current .step-title, .step.done .step-title { color: var(--ink); }
+    .step-desc { font-size: 12.5px; color: var(--faint); margin-top: 2px; line-height: 1.4; }
+    .step.current .step-desc { color: var(--muted); }
+    .step-time {
+      font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums;
+      font-family: var(--font-mono); white-space: nowrap;
+    }
 
-    /* Workflow chart - the pipeline's real branching shape (parallel
-       acquisition sources, parallel analysis, the QA pass/fail gate),
-       not a flattened step list. Nodes glow live on the job page; the
-       same markup sits inert on the home page as a map of how this works. */
-    .fc-scroll { overflow-x: auto; margin-bottom: 20px; }
-    .fc-wrap { position: relative; width: 680px; height: 700px; margin: 0 auto; }
-    .fc-svg { position: absolute; top: 0; left: 0; width: 680px; height: 700px; pointer-events: none; }
-    .fc-node {
-      position: absolute; border: 1px solid var(--hairline); background: var(--paper);
-      border-radius: 4px; padding: 8px 11px; display: flex; flex-direction: column;
-      justify-content: center; box-sizing: border-box;
-      transition: background 200ms, border-color 200ms, box-shadow 200ms;
+    .error-note {
+      margin-top: 16px; padding: 12px 14px; border-radius: 9px; background: #fdeeee;
+      border: 1px solid #f3c8c8; color: #7a2020; font-size: 12.5px; line-height: 1.5;
+      white-space: pre-wrap; font-family: var(--font-mono);
     }
-    .fc-node .fc-name { font-size: 12px; font-weight: 700; color: var(--ink-soft); line-height: 1.25; }
-    .fc-node .fc-blurb { font-size: 10px; color: var(--muted); margin-top: 2px; line-height: 1.3; }
-    .fc-node.fc-gate { border-color: var(--accent-line); background: var(--accent-soft); }
-    .fc-node.fc-gate .fc-name { color: var(--accent); }
-    .fc-node.fc-blocked { border-style: dashed; opacity: 0.5; }
-    .fc-node.fc-blocked .fc-name { color: var(--neg-ink); }
+    .qa-note {
+      margin-top: 16px; padding: 12px 14px; border-radius: 9px; background: #fdeeee;
+      border: 1px solid #f3c8c8; color: #7a2020; font-size: 13px; line-height: 1.5;
+    }
 
-    .fc-node.done { background: var(--pos-bg); border-color: var(--pos); }
-    .fc-node.done .fc-name { color: var(--pos); }
-    .fc-node.current {
-      background: var(--accent-soft); border-color: var(--accent);
-      animation: fc-pulse 1.6s cubic-bezier(0.23,1,0.32,1) infinite;
+    /* Report viewer */
+    .viewer-card { min-height: 640px; display: flex; flex-direction: column; }
+    .viewer-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+    .viewer-head h2 { margin: 0; }
+    .viewer-pane {
+      flex: 1; background: #f6f8fb; border: 1px solid var(--border); border-radius: 12px;
+      display: flex; align-items: center; justify-content: center; min-height: 560px;
+      overflow: hidden;
     }
-    .fc-node.current .fc-name { color: var(--accent); }
-    @keyframes fc-pulse {
-      0%, 100% { box-shadow: 0 0 0 0 rgba(18, 57, 94, 0.38); }
-      50% { box-shadow: 0 0 0 7px rgba(18, 57, 94, 0); }
-    }
-    .fc-node.fc-blocked.active {
-      opacity: 1; background: var(--neg-bg); border-color: var(--neg-border); border-style: solid;
-      animation: fc-pulse-red 1.6s cubic-bezier(0.23,1,0.32,1) infinite;
-    }
-    @keyframes fc-pulse-red {
-      0%, 100% { box-shadow: 0 0 0 0 rgba(193, 68, 46, 0.38); }
-      50% { box-shadow: 0 0 0 7px rgba(193, 68, 46, 0); }
-    }
-    @media (prefers-reduced-motion: reduce) {
-      .fc-node.current, .fc-node.fc-blocked.active { animation: none; }
-    }
+    .viewer-pane embed { width: 100%; height: 100%; min-height: 560px; border: none; }
+    .viewer-empty { text-align: center; padding: 40px; color: var(--muted); }
+    .viewer-empty svg { color: var(--faint); margin-bottom: 14px; }
+    .viewer-empty .big { font-size: 17px; font-weight: 700; color: var(--ink); margin-bottom: 6px; }
+    .viewer-empty .small { font-size: 13.5px; color: var(--muted); }
 """
 
-# Absolute-positioned nodes + an SVG line layer, laid out to match the
-# pipeline's real shape: request -> plan -> {market data | fundamentals |
-# documents} -> normalisation -> evidence store -> {analytics | segment
-# agents | technical appendix} -> synthesis -> QA -> (pass) {pdf | compact
-# pdf} / (blocked) withheld. Technical appendix and compact/full PDF are
-# genuinely concurrent in the pipeline now (see orchestrator.py), not just
-# drawn that way - the diagram matches the real asyncio.gather() calls.
-FLOWCHART_HTML = """
-<div class="fc-scroll"><div class="fc-wrap">
-  <svg class="fc-svg" viewBox="0 0 680 700">
-    <defs>
-      <marker id="fc-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-        <path d="M0,0 L10,5 L0,10 z" style="fill:var(--rule)"></path>
-      </marker>
-      <marker id="fc-arrow-pos" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-        <path d="M0,0 L10,5 L0,10 z" style="fill:var(--pos)"></path>
-      </marker>
-      <marker id="fc-arrow-neg" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-        <path d="M0,0 L10,5 L0,10 z" style="fill:var(--neg-border)"></path>
-      </marker>
-    </defs>
-    <g style="stroke:var(--rule);stroke-width:2;fill:none;">
-      <path d="M340,72 L340,86"></path>
-      <path d="M135,86 L545,86"></path>
-      <path d="M135,86 L135,100"></path>
-      <path d="M340,86 L340,100"></path>
-      <path d="M545,86 L545,100"></path>
-
-      <path d="M135,160 L135,174"></path>
-      <path d="M340,160 L340,174"></path>
-      <path d="M545,160 L545,174"></path>
-      <path d="M135,174 L545,174"></path>
-      <path d="M340,174 L340,186"></path>
-
-      <path d="M340,242 L340,270"></path>
-
-      <path d="M340,326 L340,340"></path>
-      <path d="M135,340 L545,340"></path>
-      <path d="M135,340 L135,354"></path>
-      <path d="M340,340 L340,354"></path>
-      <path d="M545,340 L545,354"></path>
-
-      <path d="M135,414 L135,428"></path>
-      <path d="M340,414 L340,428"></path>
-      <path d="M545,414 L545,428"></path>
-      <path d="M135,428 L545,428"></path>
-      <path d="M340,428 L340,440"></path>
-
-      <path d="M340,496 L340,524"></path>
-    </g>
-    <path d="M340,580 L340,605 M190,605 L490,605 M190,605 L190,620 M490,605 L490,620"
-          style="stroke:var(--pos);stroke-width:2;fill:none;" marker-end="url(#fc-arrow-pos)"></path>
-    <path d="M440,552 L480,552" style="stroke:var(--neg-border);stroke-width:2;fill:none;" marker-end="url(#fc-arrow-neg)"></path>
-    <text x="304" y="598" style="font:700 9.5px var(--font-ui);fill:var(--pos);">clears QA</text>
-    <text x="480" y="515" style="font:700 9.5px var(--font-ui);fill:var(--neg-ink);">critical findings</text>
-  </svg>
-
-  <div class="fc-node" data-key="planning" style="left:240px;top:16px;width:200px;height:56px;">
-    <div class="fc-name">Planning</div><div class="fc-blurb">Scope the research plan</div>
-  </div>
-
-  <div class="fc-node" data-key="acquisition" style="left:40px;top:100px;width:190px;height:60px;">
-    <div class="fc-name">Market data</div><div class="fc-blurb">Price, cap, multiples</div>
-  </div>
-  <div class="fc-node" data-key="acquisition" style="left:245px;top:100px;width:190px;height:60px;">
-    <div class="fc-name">Fundamentals</div><div class="fc-blurb">Financials &amp; KPIs</div>
-  </div>
-  <div class="fc-node" data-key="acquisition" style="left:450px;top:100px;width:190px;height:60px;">
-    <div class="fc-name">Documents</div><div class="fc-blurb">Filings, news, transcripts</div>
-  </div>
-
-  <div class="fc-node" data-key="normalisation" style="left:240px;top:186px;width:200px;height:56px;">
-    <div class="fc-name">Normalisation</div><div class="fc-blurb">Reconcile into canonical facts</div>
-  </div>
-
-  <div class="fc-node" data-key="evidence_ingestion" style="left:240px;top:270px;width:200px;height:56px;">
-    <div class="fc-name">Evidence store</div><div class="fc-blurb">Canonical facts, written</div>
-  </div>
-
-  <div class="fc-node" data-key="analysis" style="left:40px;top:354px;width:190px;height:60px;">
-    <div class="fc-name">Analytics engine</div><div class="fc-blurb">Growth, mix, surprise</div>
-  </div>
-  <div class="fc-node" data-key="analysis" style="left:245px;top:354px;width:190px;height:60px;">
-    <div class="fc-name">Segment agents</div><div class="fc-blurb">Per-section research</div>
-  </div>
-  <div class="fc-node" data-key="technical_appendix" style="left:450px;top:354px;width:190px;height:60px;">
-    <div class="fc-name">Technical appendix</div><div class="fc-blurb">Live OHLCV chart, independent of the draft</div>
-  </div>
-
-  <div class="fc-node" data-key="synthesis" style="left:240px;top:440px;width:200px;height:56px;">
-    <div class="fc-name">Synthesis</div><div class="fc-blurb">Draft narrative &amp; exhibits</div>
-  </div>
-
-  <div class="fc-node fc-gate" data-key="qa" style="left:240px;top:524px;width:200px;height:56px;">
-    <div class="fc-name">QA gate</div><div class="fc-blurb">Check every claim vs. evidence</div>
-  </div>
-  <div class="fc-node fc-blocked" data-key="__blocked" style="left:480px;top:524px;width:170px;height:56px;">
-    <div class="fc-name">Blocked</div><div class="fc-blurb">No PDF - fixes required</div>
-  </div>
-
-  <div class="fc-node" data-key="pdf" style="left:50px;top:620px;width:280px;height:60px;">
-    <div class="fc-name">Render PDF</div><div class="fc-blurb">Full report, merged with the technical appendix</div>
-  </div>
-  <div class="fc-node" data-key="compact_pdf" style="left:350px;top:620px;width:280px;height:60px;">
-    <div class="fc-name">Compact PDF</div><div class="fc-blurb">Two-page short version</div>
-  </div>
-</div></div>
-"""
-
-INDEX_HTML = """
+APP_HTML = """
 <!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
-  <title>eq_report</title>
+  <title>EquityAI</title>
   <link rel="icon" href="data:,">
-  <style>""" + BASE_STYLE + """</style>
+  <style>""" + APP_STYLE + """</style>
 </head>
 <body>
-  <div class="masthead"><div class="wrap">
-    <div><div class="mark">EQ Report &middot; Research Desk</div><h1>New report</h1></div>
-  </div></div>
-  <div class="wrap">
-    <p class="lede">Pick a ticker, run the pipeline end to end, and preview the short
-      (compact) layout the moment it clears QA.</p>
-
-    <div class="panel">
-      <form action="/generate" method="post">
-        <label for="ticker">Ticker</label>
-        <input id="ticker" name="ticker" placeholder="e.g. NVDA" autocomplete="off" required
-               style="text-transform: uppercase; font-weight: 600; letter-spacing: 0.02em;">
-        <label for="report_date">Report date</label>
-        <input id="report_date" name="report_date" type="date" value="{{ today }}">
-        <button type="submit">Generate report &rarr;</button>
-      </form>
+  <div class="shell">
+    <div class="topbar">
+      <div>
+        <div class="wordmark">Equity<span class="hl">AI</span></div>
+        <div class="subtitle">AI-Powered Equity Research</div>
+      </div>
+      <div class="tagline-top">Faster insights. Deeper decisions.</div>
     </div>
 
-    {% if jobs %}
-    <div class="panel" style="padding: 0;">
-      <table>
-        <thead><tr><th style="padding-left: 22px;">Ticker</th><th>Date</th><th>Status</th><th>Cost</th><th style="padding-right: 22px;"></th></tr></thead>
-        <tbody>
-        {% for job_id, job in jobs %}
-        <tr>
-          <td style="padding-left: 22px; font-weight: 600;">{{ job.ticker }}</td>
-          <td style="color: var(--muted);">{{ job.report_date }}</td>
-          <td><span class="tag tag-{{ job.status }}">{{ job.status }}</span></td>
-          <td>{{ "$%.2f"|format(job.cost_usd) if job.cost_usd is not none else "&mdash;" }}</td>
-          <td style="padding-right: 22px; text-align: right;"><a href="/job/{{ job_id }}">view &rarr;</a></td>
-        </tr>
-        {% endfor %}
-        </tbody>
-      </table>
+    <div class="layout">
+      <div>
+        <div class="card">
+          <h2>1. Enter Ticker</h2>
+          <p class="hint">Generate a full and compact equity research report.</p>
+          <div class="ticker-row">
+            <div class="ticker-field">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+              <input id="ticker" placeholder="AAPL" autocomplete="off" maxlength="10">
+            </div>
+            <button id="generate-btn" class="btn btn-primary" onclick="generateReports()">
+              Generate Reports
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+            </button>
+          </div>
+          <p class="example-hint">e.g. AAPL, MSFT, NVDA, TSLA</p>
+        </div>
+
+        <div class="card">
+          <h2>2. Generating Reports</h2>
+          <div class="steps" id="steps"></div>
+        </div>
+      </div>
+
+      <div class="card viewer-card">
+        <div class="viewer-head">
+          <h2>3. Report Viewer</h2>
+          <div class="toggle-group">
+            <button class="btn btn-toggle active" id="btn-full" onclick="selectViewer('full')">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+              Full Report
+            </button>
+            <button class="btn btn-toggle" id="btn-compact" onclick="selectViewer('compact')">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+              Compact Report
+            </button>
+          </div>
+        </div>
+        <div class="viewer-pane" id="viewer-pane">
+          <div class="viewer-empty">
+            <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="9" y1="13" x2="15" y2="13"></line><line x1="9" y1="17" x2="13" y2="17"></line></svg>
+            <div class="big">Your research report will appear here</div>
+            <div class="small">Enter a ticker and click &ldquo;Generate Reports&rdquo; to get started.</div>
+          </div>
+        </div>
+      </div>
     </div>
-    {% endif %}
-
-    <p class="panel-title" style="margin-top: 30px;">How it works</p>
-    {{ flowchart | safe }}
-  </div>
-</body>
-</html>
-"""
-
-JOB_HTML = """
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>eq_report &middot; {{ job.ticker }}</title>
-  <link rel="icon" href="data:,">
-  <style>""" + BASE_STYLE + """
-    .masthead .ticker { font-family: var(--font-mono); }
-
-    /* Run telemetry - a single ticker-line strip (the report's own "Market
-       data as at ..." note, not a row of boxed stat tiles), so it reads as
-       a caption under the masthead rather than competing with the workflow
-       chart for the page's one focal point. */
-    .telemetry {
-      display: flex; align-items: baseline; flex-wrap: wrap; gap: 3px 14px;
-      padding: 0 0 16px; margin-bottom: 24px; border-bottom: 1px solid var(--hairline);
-    }
-    .telemetry .t-item { display: inline-flex; align-items: baseline; gap: 6px; }
-    .telemetry .t-k { font-size: 10px; font-weight: 700; color: var(--faint);
-      text-transform: uppercase; letter-spacing: 0.06em; }
-    .telemetry .t-v { font-size: 14px; font-weight: 700; color: var(--ink-soft);
-      font-variant-numeric: tabular-nums; letter-spacing: -0.005em; }
-
-    .qa-panel { border: 1px solid var(--neg-border); background: var(--neg-bg);
-      border-radius: 3px; padding: 16px 18px; margin-top: 20px; }
-    .qa-panel .title { font-weight: 700; color: var(--neg-ink); font-size: 13px; margin-bottom: 10px; }
-    .qa-panel table { font-size: 12.5px; }
-    .qa-panel th { border-bottom-color: var(--neg-border); color: var(--neg-ink); opacity: 0.75; }
-    .qa-panel td { border-bottom-color: rgba(193, 68, 46, 0.18); }
-    .qa-panel tbody tr:nth-child(even) td { background: rgba(193, 68, 46, 0.05); }
-
-    .documents { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
-    .document-link { display: inline-block; padding: 8px 11px; border: 1px solid var(--accent-line);
-      border-radius: 3px; background: var(--accent-soft); color: var(--accent);
-      font-size: 12px; font-weight: 700; text-decoration: none; }
-    .document-link:hover { background: #d7e3ee; }
-    .report-previews { display: grid; grid-template-columns: 1fr; gap: 24px; margin-top: 22px; }
-    .report-preview h2 { font-size: 14px; margin: 0 0 8px; color: var(--ink); }
-    .report-preview embed { width: 100%; height: 78vh; min-height: 620px; border: 1px solid var(--line); background: white; }
-
-    embed { width: 100%; height: 86vh; border: 1px solid var(--hairline); border-radius: 3px; margin-top: 20px; }
-    pre { white-space: pre-wrap; background: var(--zebra); padding: 14px; border-radius: 3px;
-      font-size: 11.5px; font-family: var(--font-mono); margin-top: 16px; border: 1px solid var(--hairline); }
-  </style>
-</head>
-<body>
-  <div class="masthead"><div class="wrap">
-    <div>
-      <a class="back" href="/">&larr; new report</a>
-      <h1><span class="ticker">{{ job.ticker }}</span> <span style="opacity: 0.55; font-weight: 400;">&middot; {{ job.report_date }}</span></h1>
-    </div>
-    <span id="status-pill" class="tag tag-{{ job.status }}">{{ job.status }}</span>
-  </div></div>
-
-  <div class="wrap">
-    <div class="telemetry">
-      <span class="t-item"><span class="t-k">Elapsed</span><span class="t-v" id="m-time">0:00</span></span>
-      <span class="t-item"><span class="t-k">LLM cost</span><span class="t-v" id="m-cost">$0.00</span></span>
-      <span class="t-item"><span class="t-k">Tokens</span><span class="t-v" id="m-tokens">&mdash;</span></span>
-    </div>
-
-    <p class="panel-title">Pipeline</p>
-    {{ flowchart | safe }}
-
-    <div id="qa-wrap"></div>
-    <div id="documents"></div>
-    <div id="result"></div>
   </div>
 
   <script>
-    const jobId = {{ job_id | tojson }};
-    let clockTimer = null;
-    // Anchored to the job's own started_at (set server-side, in seconds
-    // since epoch) rather than the moment this page happened to load, so
-    // refreshing the browser doesn't reset the clock to 0:00.
-    let serverStartedAtMs = {{ (job.started_at * 1000) | tojson if job.started_at else "null" }};
+    const STEP_GROUPS = """ + json.dumps([[key, title, desc, list(stages)]
+                                            for key, title, desc, stages in STEP_GROUPS]) + """;
+    let jobId = """ + "{{ initial_job_id | tojson }}" + """;
+    let viewerMode = "full";
+    let stepStartedAt = {};
+    let pollTimer = null;
+    let tickTimer = null;
 
-    function fmtElapsed(ms) {
-      const s = Math.max(0, Math.floor(ms / 1000));
-      const m = Math.floor(s / 60);
-      const r = s % 60;
-      return m + ":" + String(r).padStart(2, "0");
+    function renderSteps(job) {
+      const completed = new Set((job && job.completed_stages) || []);
+      const active = new Set((job && job.active_stages) || []);
+      const done = job && (job.status === "done" || job.status === "failed");
+      const html = STEP_GROUPS.map((group, index) => {
+        const [key, title, desc, stages] = group;
+        const isCurrent = !done && stages.length > 0 && stages.some(s => active.has(s));
+        const groupDone = stages.length > 0 && stages.every(s => completed.has(s));
+        const isFinalizing = key === "finalizing";
+        const finalizingDone = isFinalizing && done;
+        const finalizingCurrent = isFinalizing && !done && job && job.status === "running"
+          && STEP_GROUPS.slice(0, -1).every(g => g[3].every(s => completed.has(s)));
+        const cls = (groupDone || finalizingDone) ? "done" : (isCurrent || finalizingCurrent) ? "current" : "";
+        if ((isCurrent || finalizingCurrent) && !stepStartedAt[key]) stepStartedAt[key] = Date.now();
+        const showTime = cls === "current" && stepStartedAt[key];
+        return `<div class="step ${cls}" data-key="${key}">
+          <div class="step-dot"></div>
+          <div class="step-body">
+            <div class="step-title-row">
+              <span class="step-title">${title}</span>
+              <span class="step-time" data-key="${key}">${showTime ? fmtSecs(Date.now() - stepStartedAt[key]) : ""}</span>
+            </div>
+            <div class="step-desc">${desc}</div>
+          </div>
+        </div>`;
+      }).join("");
+      document.getElementById("steps").innerHTML = html;
     }
 
-    function applyStages(job) {
-      const completed = new Set(job.completed_stages || []);
-      // A list, not one value: some stages now genuinely run at the same
-      // time (technical appendix alongside analysis, pdf alongside compact
-      // pdf), so more than one box can glow at once.
-      const active = new Set(job.active_stages || []);
-      document.querySelectorAll(".fc-node[data-key]").forEach(el => {
+    function fmtSecs(ms) {
+      return Math.max(0, Math.round(ms / 1000)) + "s";
+    }
+
+    function tickTimes() {
+      document.querySelectorAll(".step-time[data-key]").forEach(el => {
         const key = el.dataset.key;
-        if (key === "__blocked") {
-          el.classList.toggle("active", !!job.qa_critical);
-          return;
-        }
-        el.classList.remove("done", "current");
-        if (completed.has(key)) {
-          el.classList.add("done");
-        } else if (active.has(key)) {
-          el.classList.add("current");
+        const row = el.closest(".step");
+        if (row.classList.contains("current") && stepStartedAt[key]) {
+          el.textContent = fmtSecs(Date.now() - stepStartedAt[key]);
         }
       });
     }
 
-    function renderQa(job) {
-      const wrap = document.getElementById("qa-wrap");
-      if (job.qa_critical) {
-        let rows = (job.qa_reasons || []).map(r =>
-          `<tr><td>${r.check}</td><td>${r.count}</td></tr>`).join("");
-        wrap.innerHTML = `
-          <div class="qa-panel">
-            <div class="title">QA blocked publication &middot; ${job.qa_critical} critical / ${job.qa_warnings} warning finding(s)</div>
-            <table><thead><tr><th>Check</th><th>Count</th></tr></thead><tbody>${rows}</tbody></table>
-          </div>`;
+    function selectViewer(mode) {
+      viewerMode = mode;
+      document.getElementById("btn-full").classList.toggle("active", mode === "full");
+      document.getElementById("btn-compact").classList.toggle("active", mode === "compact");
+      renderViewer(window.__lastJob || null);
+    }
+
+    function renderViewer(job) {
+      const pane = document.getElementById("viewer-pane");
+      const artifacts = (job && job.artifacts) || {};
+      const key = viewerMode === "full" ? "full_pdf" : "compact_pdf";
+      if (job && job.status === "done" && artifacts[key]) {
+        pane.innerHTML = `<embed src="/document/${jobId}/${key}" type="application/pdf">`;
+      } else if (job && job.status === "failed") {
+        const qaMsg = job.qa_critical
+          ? `QA blocked publication: ${job.qa_critical} critical finding(s), ${job.qa_warnings} warning(s).`
+          : (job.error || "The run failed.");
+        pane.innerHTML = `<div class="viewer-empty">
+          <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+          <div class="big">This report could not be completed</div>
+          <div class="small">${qaMsg.replace(/</g, "&lt;")}</div>
+        </div>`;
+      } else if (job) {
+        pane.innerHTML = `<div class="viewer-empty">
+          <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+          <div class="big">Generating your report&hellip;</div>
+          <div class="small">${job.ticker} &middot; this can take several minutes.</div>
+        </div>`;
       } else {
-        wrap.innerHTML = "";
+        pane.innerHTML = `<div class="viewer-empty">
+          <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="9" y1="13" x2="15" y2="13"></line><line x1="9" y1="17" x2="13" y2="17"></line></svg>
+          <div class="big">Your research report will appear here</div>
+          <div class="small">Enter a ticker and click &ldquo;Generate Reports&rdquo; to get started.</div>
+        </div>`;
       }
     }
 
-    function renderDocuments(job) {
-      const wrap = document.getElementById("documents");
-      const artifacts = Object.entries(job.artifacts || {});
-      if (!artifacts.length) {
-        wrap.innerHTML = "";
-        return;
+    async function generateReports() {
+      const ticker = document.getElementById("ticker").value.trim().toUpperCase();
+      if (!ticker) return;
+      const btn = document.getElementById("generate-btn");
+      btn.disabled = true;
+      stepStartedAt = {};
+      try {
+        const res = await fetch("/api/generate", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ticker}),
+        });
+        const body = await res.json();
+        if (!res.ok) {
+          alert(body.error || "Could not start the report.");
+          btn.disabled = false;
+          return;
+        }
+        jobId = body.job_id;
+        history.replaceState(null, "", `/job/${jobId}`);
+        renderSteps(null);
+        renderViewer({status: "running", ticker});
+        poll();
+      } catch (err) {
+        alert("Could not reach the server: " + err);
+        btn.disabled = false;
       }
-      wrap.innerHTML = `<div class="documents">${artifacts.map(([kind, item]) =>
-        `<a class="document-link" href="/document/${jobId}/${kind}" target="_blank" rel="noopener">${item.label} &nearr;</a>`
-      ).join("")}</div>`;
     }
 
     async function poll() {
+      if (!jobId) return;
       const res = await fetch(`/api/job/${jobId}`);
       const job = await res.json();
+      window.__lastJob = job;
+      renderSteps(job);
+      renderViewer(job);
+      const btn = document.getElementById("generate-btn");
+      if (job.ticker) document.getElementById("ticker").value = job.ticker;
 
-      document.getElementById("status-pill").textContent = job.status;
-      document.getElementById("status-pill").className = "tag tag-" + job.status;
-      applyStages(job);
-      renderDocuments(job);
-
-      if (job.started_at) {
-        serverStartedAtMs = job.started_at * 1000;
-      }
-
-      if (job.cost_usd != null) {
-        document.getElementById("m-cost").textContent = "$" + job.cost_usd.toFixed(2);
-      }
-      if (job.input_tokens != null) {
-        const total = (job.input_tokens || 0) + (job.output_tokens || 0);
-        document.getElementById("m-tokens").textContent = total.toLocaleString();
-      }
-      if (job.duration_ms != null) {
-        document.getElementById("m-time").textContent = fmtElapsed(job.duration_ms);
-        clearInterval(clockTimer);
-      }
-
-      if (job.status === "done" && job.compact_pdf) {
-        renderQa(job);
-        const artifacts = job.artifacts || {};
-        const previews = [];
-        if (artifacts.compact_pdf) previews.push(
-          `<section class="report-preview"><h2>Short report</h2><embed src="/document/${jobId}/compact_pdf" type="application/pdf"></section>`);
-        if (artifacts.full_pdf) previews.push(
-          `<section class="report-preview"><h2>Long report</h2><embed src="/document/${jobId}/full_pdf" type="application/pdf"></section>`);
-        document.getElementById("result").innerHTML =
-          `<div class="report-previews">${previews.join("")}</div>`;
+      if (job.status === "done" || job.status === "failed") {
+        btn.disabled = false;
+        clearTimeout(pollTimer);
         return;
       }
-      if (job.status === "failed") {
-        renderQa(job);
-        if (!job.qa_critical) {
-          document.getElementById("result").innerHTML =
-            `<pre>${(job.error || "Unknown error").replace(/</g, "&lt;")}</pre>`;
-        }
-        return;
-      }
-      setTimeout(poll, 1500);
+      btn.disabled = true;
+      pollTimer = setTimeout(poll, 1200);
     }
 
-    clockTimer = setInterval(() => {
-      if (serverStartedAtMs != null) {
-        document.getElementById("m-time").textContent = fmtElapsed(Date.now() - serverStartedAtMs);
-      }
-    }, 1000);
-    poll();
+    renderSteps(null);
+    tickTimer = setInterval(tickTimes, 1000);
+    if (jobId) { renderViewer({status: "running"}); poll(); }
   </script>
 </body>
 </html>
 """
-
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5050, debug=False)
