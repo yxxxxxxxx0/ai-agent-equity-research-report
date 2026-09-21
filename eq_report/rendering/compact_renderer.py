@@ -19,8 +19,11 @@ from reportlab.pdfgen.canvas import Canvas
 from ..config import ProviderCredentials, Settings
 from ..domain.enums import ReportSection
 from ..domain.report import MetricTable, ReportDraft
+from ..logging_setup import get_logger
 from .json_loader import load_report_json
 from .technical_appendix import build_technical_appendix_pdf, merge_technical_appendix
+
+logger = get_logger("rendering.compact")
 
 NAVY = colors.HexColor("#12395e")
 INK = colors.HexColor("#1a1a1a")
@@ -351,7 +354,17 @@ def render_compact_report(
     credentials: ProviderCredentials | None = None,
     timeout: int = 30,
 ) -> Path:
-    """Write a two-page brief: one dense research page plus technical analysis."""
+    """Write a two-page brief: one dense research page plus technical analysis.
+
+    The two pages are independent: the brief is built entirely from the
+    already-validated ReportDraft, while the technical appendix makes its own
+    live OHLCV fetch (see technical_appendix.py) and can fail for reasons that
+    have nothing to do with the brief - a data-availability gap at MegaAPI,
+    not a defect in the report itself. A live-fetch failure there must not
+    also destroy the brief page; it degrades to a one-page compact report
+    instead of raising, the same "partial data still yields partial output"
+    policy the rest of the pipeline follows.
+    """
     report_json = Path(report_json)
     output_pdf = Path(output_pdf)
     draft, _ = load_report_json(report_json)
@@ -364,6 +377,13 @@ def render_compact_report(
             page_label="Page 2 of 2", credentials=credentials, timeout=timeout,
         )
         return merge_technical_appendix(brief_pdf, appendix_pdf, output_pdf)
+    except Exception as exc:  # noqa: BLE001 - the brief page must still ship
+        logger.warning(
+            "Technical appendix unavailable (%s: %s); shipping the one-page brief alone.",
+            type(exc).__name__, exc,
+        )
+        brief_pdf.replace(output_pdf)
+        return output_pdf
     finally:
         brief_pdf.unlink(missing_ok=True)
         appendix_pdf.unlink(missing_ok=True)
