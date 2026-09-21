@@ -188,6 +188,11 @@ def _has_useful_payload(payload: Any) -> bool:
     return True
 
 
+def _is_date_key(key: str) -> bool:
+    """True for a dict key shaped like "YYYY-MM-DD" (a date-keyed series)."""
+    return len(key) >= 10 and key[4:5] == "-" and key[7:8] == "-" and key[:4].isdigit()
+
+
 def _flatten_observations(
     payload: Any, plan: ResearchPlan, request: DataRequest, url: str
 ) -> tuple[RawObservation, ...]:
@@ -228,7 +233,18 @@ def _flatten_observations(
             for key, child in value.items():
                 if key in ("date", "datetime", "timestamp"):
                     continue  # metadata for the record, not a metric in its own right
-                walk(child, (*path, str(key)), own_date)
+                if _is_date_key(key):
+                    # A date-keyed dict is the same shape problem as a
+                    # day-indexed list (e.g. fundamentals returned as
+                    # {"2026-01-22": {"revenue": ..., "eps": ...}}), just with
+                    # the date as a dict key instead of a list index or a
+                    # sibling field. Treat it the same way: it supplies the
+                    # date, not a piece of the metric's name, or "revenue"
+                    # would become a distinct fake metric per reporting date
+                    # and never match a canonical alias.
+                    walk(child, path, str(key)[:10])
+                else:
+                    walk(child, (*path, str(key)), own_date)
         elif isinstance(value, list):
             for index, child in enumerate(value):
                 walk(child, (*path, str(index)), record_date)
