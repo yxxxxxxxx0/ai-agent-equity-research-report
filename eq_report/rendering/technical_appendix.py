@@ -190,12 +190,13 @@ def _draw_x_axis(c: Canvas, x: float, y: float, w: float, dates: list[dt.date]) 
     tick_count = min(_PANEL_X_TICKS, last + 1)
     steps = sorted({round(last * i / (tick_count - 1)) for i in range(tick_count)}) \
         if tick_count > 1 else [0]
-    c.setStrokeColor(colors.HexColor("#c8ccd4"))
-    c.setFillColor(colors.HexColor("#5c6470"))
-    c.setFont("Helvetica", 5.6)
+    c.setStrokeColor(colors.HexColor("#98a1ad"))
+    c.setLineWidth(0.9)
+    c.setFillColor(colors.HexColor("#4a5158"))
+    c.setFont("Helvetica", 6.1)
     for i in steps:
         px = x + w * i / last
-        c.line(px, y, px, y - 2.5)
+        c.line(px, y, px, y - 3)
         label = dates[i].strftime("%m/%d")
         if i == 0:
             c.drawString(px, y - 9, label)
@@ -216,14 +217,16 @@ def _plot(c: Canvas, x: float, y: float, w: float, h: float, title: str,
     # Keep titles and series keys on separate baselines.  Several panels have
     # long titles (notably Bollinger Bands) and up to four series; putting
     # both on the same line made the labels collide in the A4 appendix.
-    c.setFont("Helvetica-Bold", 8)
+    c.setFont("Helvetica-Bold", 8.5)
     c.setFillColor(colors.HexColor("#12395e"))
     c.drawString(x, y + h + 18, title)
-    c.setStrokeColor(colors.HexColor("#c8ccd4")); c.rect(x, y, w, h, stroke=1, fill=0)
+    c.setStrokeColor(colors.HexColor("#98a1ad")); c.setLineWidth(1.0); c.rect(x, y, w, h, stroke=1, fill=0)
     for level in range(1, 4):
-        yy = y + h * level / 4; c.setStrokeColor(colors.HexColor("#e6e9ee")); c.line(x, yy, x + w, yy)
+        yy = y + h * level / 4
+        c.setStrokeColor(colors.HexColor("#d7dbe1")); c.setLineWidth(0.6)
+        c.line(x, yy, x + w, yy)
     for label, values, color in series:
-        c.setStrokeColor(color); c.setLineWidth(1.15)
+        c.setStrokeColor(color); c.setLineWidth(1.6)
         previous = None
         for i, value in enumerate(values):
             if value is None:
@@ -236,9 +239,9 @@ def _plot(c: Canvas, x: float, y: float, w: float, h: float, title: str,
     if len(series) > 1:
         for index, (label, _, color) in enumerate(series):
             c.setFillColor(color)
-            c.setFont("Helvetica", 6.3)
+            c.setFont("Helvetica-Bold", 6.8)
             c.drawString(x + index * (w / len(series)), y + h + 7, label)
-    c.setFillColor(colors.HexColor("#5c6470")); c.setFont("Helvetica", 6.5)
+    c.setFillColor(colors.HexColor("#4a5158")); c.setFont("Helvetica", 7)
     c.drawRightString(x - 3, y + h - 2, _axis_label(hi)); c.drawRightString(x - 3, y - 2, _axis_label(lo))
     _draw_x_axis(c, x, y, w, dates or [])
 
@@ -257,17 +260,19 @@ def _plot_candlestick(
     lo, hi = min(lows), max(highs)
     span = (hi - lo) or 1
     lo, hi = lo - span * .08, hi + span * .08
-    c.setFont("Helvetica-Bold", 8)
+    c.setFont("Helvetica-Bold", 8.5)
     c.setFillColor(colors.HexColor("#12395e"))
     c.drawString(x, y + h + 18, title)
-    c.setStrokeColor(colors.HexColor("#c8ccd4")); c.rect(x, y, w, h, stroke=1, fill=0)
+    c.setStrokeColor(colors.HexColor("#98a1ad")); c.setLineWidth(1.0); c.rect(x, y, w, h, stroke=1, fill=0)
     for level in range(1, 4):
-        yy = y + h * level / 4; c.setStrokeColor(colors.HexColor("#e6e9ee")); c.line(x, yy, x + w, yy)
+        yy = y + h * level / 4
+        c.setStrokeColor(colors.HexColor("#d7dbe1")); c.setLineWidth(0.6)
+        c.line(x, yy, x + w, yy)
 
-    up_color, down_color = colors.HexColor("#2f6f5e"), colors.HexColor("#a13f3f")
+    up_color, down_color = colors.HexColor("#1f7a5c"), colors.HexColor("#b7383f")
     n = len(closes)
     slot = w / max(n, 1)
-    body_w = max(slot * 0.6, 0.6)
+    body_w = max(slot * 0.68, 0.9)
     for i in range(n):
         cx = x + slot * (i + 0.5)
         up = closes[i] >= opens[i]
@@ -276,14 +281,14 @@ def _plot_candlestick(
         def sy(value: float) -> float:
             return y + h * (value - lo) / (hi - lo)
 
-        c.setStrokeColor(color); c.setLineWidth(0.7)
+        c.setStrokeColor(color); c.setLineWidth(1.0)
         c.line(cx, sy(lows[i]), cx, sy(highs[i]))
         body_lo, body_hi = sorted((sy(opens[i]), sy(closes[i])))
-        body_hi = max(body_hi, body_lo + 0.4)  # a doji still draws a visible sliver
+        body_hi = max(body_hi, body_lo + 0.6)  # a doji still draws a visible sliver
         c.setFillColor(color)
         c.rect(cx - body_w / 2, body_lo, body_w, body_hi - body_lo, stroke=0, fill=1)
 
-    c.setFillColor(colors.HexColor("#5c6470")); c.setFont("Helvetica", 6.5)
+    c.setFillColor(colors.HexColor("#4a5158")); c.setFont("Helvetica", 7)
     c.drawRightString(x - 3, y + h - 2, _axis_label(hi)); c.drawRightString(x - 3, y - 2, _axis_label(lo))
     _draw_x_axis(c, x, y, w, dates)
 

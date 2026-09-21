@@ -17,6 +17,7 @@ from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen.canvas import Canvas
 
 from ..config import ProviderCredentials, Settings
+from ..domain.enums import ReportSection
 from ..domain.report import MetricTable, ReportDraft
 from .json_loader import load_report_json
 from .technical_appendix import build_technical_appendix_pdf, merge_technical_appendix
@@ -72,14 +73,48 @@ def _bullets(c: Canvas, x: float, y: float, width: float, texts: list[str], *,
     return y
 
 
+#: Height of a filled section-title bar, and the light card background drawn
+#: beneath it - the two together give each section the boxed-grid look
+#: (solid title bar, framed content box) instead of a bare rule under text.
+_BAR_H = 14.0
+
+
 def _heading(c: Canvas, x: float, y: float, label: str, *, width: float = 535.0) -> float:
-    """A full-width section rule gives each two-column block the same rhythm."""
+    """A solid-filled title bar spanning the section's full width."""
     c.setFillColor(NAVY)
-    c.setFont("Helvetica-Bold", 8.2)
-    c.drawString(x, y, label.upper())
+    c.rect(x, y - _BAR_H + 3, width, _BAR_H, fill=1, stroke=0)
+    c.setFillColor(colors.white)
+    c.setFont("Helvetica-Bold", 8.0)
+    c.drawString(x + 6, y - 7, label.upper())
+    return y - _BAR_H - 5
+
+
+def _card(c: Canvas, x: float, y_top: float, width: float, height: float) -> None:
+    """A light bordered box under a section bar, framing its content."""
+    c.setFillColor(colors.white)
     c.setStrokeColor(RULE)
-    c.line(x, y - 3, x + width, y - 3)
-    return y - 13
+    c.setLineWidth(0.6)
+    c.rect(x, y_top - height, width, height, fill=1, stroke=1)
+
+
+def _bullet_block_height(
+    texts: list[str], *, size: float = 6.35, max_lines: int = 2, extra: float = 12.0,
+) -> float:
+    """Worst-case height a `_bullets` call can take, for drawing its card first.
+
+    `_bullets` never exceeds `max_lines` per item (it truncates with an
+    ellipsis), so this upper bound is exact enough to size a background card
+    that always fully contains the text drawn on top of it afterward.
+    """
+    n = sum(1 for t in texts if t)
+    return n * (max_lines * (size + 1.25) + 2) + extra
+
+
+def _table_block_height(table: MetricTable | None) -> float:
+    """Exact height `_table` descends by, for sizing its card ahead of time."""
+    if table is None or not table.columns:
+        return 0.0
+    return 10 + 10 + min(len(table.rows), 4) * 10 + 4
 
 
 def _key_data(c: Canvas, draft: ReportDraft, y: float) -> float:
@@ -163,9 +198,14 @@ def _table(c: Canvas, x: float, y: float, width: float, table: MetricTable) -> f
 
 
 def _render_brief(draft: ReportDraft, output_pdf: Path) -> None:
+    """A boxed-grid brief: a solid title bar plus a framed card per section,
+    each card sized ahead of drawing so its background never clips the text
+    painted on top of it afterward (see _bullet_block_height/_table_block_height)."""
     page_w, page_h = A4
     c = Canvas(str(output_pdf), pagesize=A4)
     c.setTitle(f"{draft.ticker} compact equity brief")
+    left_x, right_x, col_w = 30.0, 306.0, 252.0
+    full_w = page_w - 60
 
     c.setFillColor(NAVY)
     c.rect(0, page_h - 58, page_w, 58, fill=1, stroke=0)
@@ -178,106 +218,108 @@ def _render_brief(draft: ReportDraft, output_pdf: Path) -> None:
     y = page_h - 72
     y = _key_data(c, draft, y)
 
-    takeaways = draft.section(next(s.section for s in draft.sections if s.title == "Key Takeaways"))
-    y = _heading(c, 30, y, "Investment snapshot")
-    if takeaways:
-        y = _bullets(c, 30, y, page_w - 60,
-                     [statement.text for statement in takeaways.statements[:3]],
-                     max_words=42, size=6.55, max_lines=2)
-
     company = next((s for s in draft.sections if s.title == "Company Snapshot"), None)
+    # A thin/degraded run may omit Key Takeaways entirely - the brief should
+    # still render with that block empty, not crash (StopIteration on a
+    # generator with no default was the previous bug here).
+    takeaways_section = next(
+        (s.section for s in draft.sections if s.title == "Key Takeaways"), None)
+    takeaways = draft.section(takeaways_section) if takeaways_section else None
     competitive = next((s for s in draft.sections if s.title == "Competitive Landscape"), None)
-    y = _heading(c, 30, y, "Company snapshot and competitive landscape")
-    c.setFillColor(NAVY)
-    c.setFont("Helvetica-Bold", 6.8)
-    c.drawString(30, y, "Company snapshot")
-    c.drawString(306, y, "Competitive landscape")
-    company_y = _bullets(c, 30, y - 10, 252, [
-        company.summary if company else "",
-        company.statements[0].text if company and company.statements else "",
-        company.statements[1].text if company and len(company.statements) > 1 else "",
-    ], max_words=28)
-    competitive_y = _bullets(c, 306, y - 10, 252, [
-        competitive.summary if competitive else "",
-        competitive.statements[0].text if competitive and competitive.statements else "",
-        competitive.statements[1].text if competitive and len(competitive.statements) > 1 else "",
-    ], max_words=28)
-    y = min(company_y, competitive_y) - 6
-
     financial = next((s for s in draft.sections if "Financial Performance" in s.title), None)
     drivers = next((s for s in draft.sections if "Operating Drivers" in s.title), None)
-    left_y = _heading(c, 30, y, "Reported results and drivers")
-    right_y = left_y
-    if financial and financial.tables:
-        left_y = _table(c, 30, left_y, 258, financial.tables[0])
-    if drivers and drivers.tables:
-        right_y = _table(c, 306, right_y, 258, drivers.tables[0])
-    y = min(left_y, right_y) - 3
-
-    valuation = next((s for s in draft.sections if "Valuation" in s.title), None)
-    monitoring = next((s for s in draft.sections if "Monitoring" in s.title), None)
-    y = _heading(c, 30, y, "Valuation and watch items")
-    left_x, right_x = 30.0, 306.0
-    if valuation:
-        y_left = _bullets(c, left_x, y, 250, [
-            valuation.summary,
-            valuation.statements[0].text if valuation.statements else "",
-            valuation.statements[1].text if len(valuation.statements) > 1 else "",
-        ], max_words=27)
-    else:
-        y_left = y
-    watch = monitoring.statements if monitoring else ()
-    if watch:
-        y_right = _bullets(c, right_x, y, 250, [statement.text for statement in watch[:2]],
-                           max_words=29)
-    else:
-        y_right = y
-
-    y = min(y_left, y_right) - 6
+    # By .section id, not a title substring: RISKS, CATALYSTS and
+    # WHAT_MATTERS_NEXT all happen to contain "Monitoring" in their printed
+    # titles, so a substring match here would pick whichever came first.
+    risks = next((s for s in draft.sections if s.section == ReportSection.RISKS), None)
+    monitoring = next((s for s in draft.sections if s.section == ReportSection.WHAT_MATTERS_NEXT), None)
     recent = next((s for s in draft.sections if s.title == "Recent Developments"), None)
-    y = _heading(c, 30, y, "Recent developments and risk frame")
-    c.setFillColor(NAVY)
-    c.setFont("Helvetica-Bold", 6.8)
-    c.drawString(left_x, y, "Developments")
-    c.drawString(right_x, y, "Risks and catalysts")
-    recent_y = _bullets(c, left_x, y - 10, 250,
-                        [item.text for item in (recent.statements if recent else ())],
-                        max_words=34)
-    risk_y = _bullets(c, right_x, y - 10, 250, [
-        recent.statements[3].text if recent and len(recent.statements) > 3 else "",
-        takeaways.statements[5].text if takeaways and len(takeaways.statements) > 5 else "",
-        takeaways.statements[3].text if takeaways and len(takeaways.statements) > 3 else "",
-    ], max_words=34)
 
+    # -- Company overview (full width) - the reference's "Quick Introduction" -
+    intro_texts = [
+        company.summary if company else "",
+        company.statements[0].text if company and company.statements else "",
+    ]
+    h = _bullet_block_height(intro_texts, size=6.55, max_lines=2)
+    bar_y = _heading(c, left_x, y, "Company overview", width=full_w)
+    _card(c, left_x, bar_y + 5, full_w, h)
+    y = _bullets(c, left_x + 4, bar_y - 2, full_w - 8, intro_texts, max_words=42, size=6.55, max_lines=2)
+
+    # -- Investment snapshot (full width) - the reference's "Summary" -
+    snapshot_texts = [s.text for s in (takeaways.statements[:3] if takeaways else ())]
+    h = _bullet_block_height(snapshot_texts, size=6.55, max_lines=2)
+    bar_y = _heading(c, left_x, y - 4, "Investment snapshot", width=full_w)
+    _card(c, left_x, bar_y + 5, full_w, h)
+    y = _bullets(c, left_x + 4, bar_y - 2, full_w - 8, snapshot_texts, max_words=42, size=6.55, max_lines=2)
+
+    # -- Key metrics & growth drivers (two columns of tables) -
+    bar_y = _heading(c, left_x, y - 4, "Key metrics & growth drivers", width=full_w)
+    financial_table = financial.tables[0] if financial and financial.tables else None
+    drivers_table = drivers.tables[0] if drivers and drivers.tables else None
+    h = max(_table_block_height(financial_table), _table_block_height(drivers_table), 14)
+    _card(c, left_x, bar_y + 5, col_w, h)
+    _card(c, right_x, bar_y + 5, col_w, h)
+    left_y = _table(c, left_x + 4, bar_y - 2, col_w - 8, financial_table) if financial_table else bar_y
+    right_y = _table(c, right_x + 4, bar_y - 2, col_w - 8, drivers_table) if drivers_table else bar_y
+    y = min(left_y, right_y) - 6
+
+    # -- Competitive landscape & business risk (two columns) -
+    competitive_texts = [
+        competitive.summary if competitive else "",
+        competitive.statements[0].text if competitive and competitive.statements else "",
+    ]
+    risk_texts = [
+        risks.statements[0].text if risks and risks.statements else "",
+        risks.statements[1].text if risks and len(risks.statements) > 1 else "",
+    ]
+    h = max(_bullet_block_height(competitive_texts), _bullet_block_height(risk_texts))
+    bar_y = _heading(c, left_x, y - 4, "Competitive landscape & business risk", width=full_w)
+    c.setFillColor(NAVY); c.setFont("Helvetica-Bold", 6.6)
+    c.drawString(left_x + 4, bar_y - 8, "Competitive landscape")
+    c.drawString(right_x + 4, bar_y - 8, "Business risk")
+    _card(c, left_x, bar_y + 5, col_w, h + 10)
+    _card(c, right_x, bar_y + 5, col_w, h + 10)
+    left_y = _bullets(c, left_x + 4, bar_y - 18, col_w - 8, competitive_texts, max_words=28)
+    right_y = _bullets(c, right_x + 4, bar_y - 18, col_w - 8, risk_texts, max_words=28)
+    y = min(left_y, right_y) - 6
+
+    # -- What matters next & recent developments (two columns) -
+    # "What matters next" (checkable, evidence-scoped forward catalysts) takes
+    # the slot a sentiment/social box would otherwise occupy in this layout -
+    # the report states no market sentiment gauge, by design.
+    watch_texts = [s.text for s in ((monitoring.statements[:2] if monitoring else ()))]
+    recent_texts = [s.text for s in (recent.statements[:2] if recent else ())]
+    h = max(_bullet_block_height(watch_texts), _bullet_block_height(recent_texts))
+    bar_y = _heading(c, left_x, y - 4, "What matters next & recent developments", width=full_w)
+    c.setFillColor(NAVY); c.setFont("Helvetica-Bold", 6.6)
+    c.drawString(left_x + 4, bar_y - 8, "What matters next")
+    c.drawString(right_x + 4, bar_y - 8, "Recent developments")
+    _card(c, left_x, bar_y + 5, col_w, h + 10)
+    _card(c, right_x, bar_y + 5, col_w, h + 10)
+    left_y = _bullets(c, left_x + 4, bar_y - 18, col_w - 8, watch_texts, max_words=29)
+    right_y = _bullets(c, right_x + 4, bar_y - 18, col_w - 8, recent_texts, max_words=34)
+    y = min(left_y, right_y) - 6
+
+    # -- Peer comparison (full-width table, then a two-column caveat) -
     peer_table = competitive.tables[0] if competitive and competitive.tables else None
     if peer_table:
-        peer_y = _heading(c, 30, min(recent_y, risk_y) - 6, "Peer comparison")
-        peer_y = _table(c, 30, peer_y, page_w - 60, peer_table) - 5
-        c.setFillColor(NAVY)
-        c.setFont("Helvetica-Bold", 6.3)
-        c.drawString(left_x, peer_y, "What the comparison shows")
-        c.drawString(right_x, peer_y, "What it cannot establish")
-        comparison_texts = (
-            [valuation.statements[0].text, valuation.statements[1].text]
-            if valuation and len(valuation.statements) > 1
-            else ["The peer table is a directional valuation and growth comparison."]
-        )
+        bar_y = _heading(c, left_x, y - 4, "Peer comparison", width=full_w)
         limitations_text = (
             "The comparison is not like-for-like: the available evidence does not provide "
             "peer segment mix, margins, earnings growth, product exposure, regional mix or "
-            "capital intensity. It therefore cannot attribute the valuation gap to durable "
-            "competitive advantage, autonomy optionality, energy economics or operating execution."
+            "capital intensity, so it cannot attribute the valuation gap to any one driver."
         )
-        comparison_y = _bullets(c, left_x, peer_y - 9, 250, comparison_texts,
-                                max_words=34, size=5.95, max_lines=2)
-        limitation_y = _bullets(c, right_x, peer_y - 9, 250, [limitations_text],
-                                max_words=38, size=5.95, max_lines=3)
-        footer_y = min(comparison_y, limitation_y) - 3
+        h = _table_block_height(peer_table) + _bullet_block_height([limitations_text], size=5.95, max_lines=3)
+        _card(c, left_x, bar_y + 5, full_w, h)
+        table_y = _table(c, left_x + 4, bar_y - 2, full_w - 8, peer_table) - 3
+        footer_y = _bullets(c, left_x + 4, table_y, full_w - 8, [limitations_text],
+                            max_words=38, size=5.95, max_lines=3)
     else:
-        footer_y = min(recent_y, risk_y) - 6
+        footer_y = y
 
-    # Use otherwise-empty lower-page space for additional evidence, including
-    # attributed KOL commentary. Keep the footer clear and typography stable.
+    # Use otherwise-empty lower-page space for additional cited evidence - the
+    # reference's "News" box, filled from this report's own sourced statements
+    # rather than an unattributed feed.
     if footer_y > 105:
         used = {
             statement.text for section in draft.sections
@@ -289,12 +331,12 @@ def _render_brief(draft: ReportDraft, output_pdf: Path) -> None:
             if statement.text not in used
         ]
         if candidates:
-            extra_y = _heading(c, 30, footer_y, "Additional evidence and KOL perspectives")
-            capacity = max(1, min(6, int((extra_y - 48) / 18)))
-            footer_y = _bullets(
-                c, 30, extra_y, page_w - 60, candidates[:capacity],
-                max_words=40, size=6.2, max_lines=2,
-            )
+            capacity = max(1, min(6, int((footer_y - 48) / 18)))
+            picked = candidates[:capacity]
+            h = _bullet_block_height(picked, size=6.2, max_lines=2)
+            bar_y = _heading(c, left_x, footer_y, "Additional evidence", width=full_w)
+            _card(c, left_x, bar_y + 5, full_w, h)
+            footer_y = _bullets(c, left_x + 4, bar_y - 2, full_w - 8, picked, max_words=40, size=6.2, max_lines=2)
 
     c.setFillColor(MUTED)
     c.setFont("Helvetica", 5.8)
