@@ -319,6 +319,12 @@ APP_STYLE = """
       --step-line: #e4e8f0;
       --font-ui: -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
       --font-mono: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+      /* Aliases for the workflow map (fc-*), carried over from the original
+         report-styled palette so that markup can be reused verbatim. */
+      --paper: var(--card-bg); --rule: var(--border); --hairline: #eef1f6;
+      --accent: var(--navy); --accent-line: var(--blue); --accent-soft: var(--blue-soft);
+      --pos: #1f9d6b; --pos-bg: #e6f7ef;
+      --neg-border: #d64545; --neg-bg: #fdeeee; --neg-ink: #7a2020;
     }
     * { box-sizing: border-box; }
     body {
@@ -438,6 +444,159 @@ APP_STYLE = """
     .viewer-empty svg { color: var(--faint); margin-bottom: 14px; }
     .viewer-empty .big { font-size: 17px; font-weight: 700; color: var(--ink); margin-bottom: 6px; }
     .viewer-empty .small { font-size: 13.5px; color: var(--muted); }
+
+    /* Workflow map - the pipeline's real branching shape (parallel
+       acquisition sources, parallel analysis, the QA pass/fail gate), not a
+       flattened step list. Nodes glow live from the same job data the step
+       tracker above uses. */
+    .map-card { margin-top: 18px; }
+    .fc-scroll { overflow-x: auto; }
+    .fc-wrap { position: relative; width: 680px; height: 700px; margin: 0 auto; }
+    .fc-svg { position: absolute; top: 0; left: 0; width: 680px; height: 700px; pointer-events: none; }
+    .fc-node {
+      position: absolute; border: 1px solid var(--hairline); background: var(--paper);
+      border-radius: 4px; padding: 8px 11px; display: flex; flex-direction: column;
+      justify-content: center; box-sizing: border-box;
+      transition: background 200ms, border-color 200ms, box-shadow 200ms;
+    }
+    .fc-node .fc-name { font-size: 12px; font-weight: 700; color: var(--ink-soft); line-height: 1.25; }
+    .fc-node .fc-blurb { font-size: 10px; color: var(--muted); margin-top: 2px; line-height: 1.3; }
+    .fc-node.fc-gate { border-color: var(--accent-line); background: var(--accent-soft); }
+    .fc-node.fc-gate .fc-name { color: var(--accent); }
+    .fc-node.fc-blocked { border-style: dashed; opacity: 0.5; }
+    .fc-node.fc-blocked .fc-name { color: var(--neg-ink); }
+
+    .fc-node.done { background: var(--pos-bg); border-color: var(--pos); }
+    .fc-node.done .fc-name { color: var(--pos); }
+    .fc-node.current {
+      background: var(--accent-soft); border-color: var(--accent);
+      animation: fc-pulse 1.6s cubic-bezier(0.23,1,0.32,1) infinite;
+    }
+    .fc-node.current .fc-name { color: var(--accent); }
+    @keyframes fc-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(18, 57, 94, 0.38); }
+      50% { box-shadow: 0 0 0 7px rgba(18, 57, 94, 0); }
+    }
+    .fc-node.fc-blocked.active {
+      opacity: 1; background: var(--neg-bg); border-color: var(--neg-border); border-style: solid;
+      animation: fc-pulse-red 1.6s cubic-bezier(0.23,1,0.32,1) infinite;
+    }
+    @keyframes fc-pulse-red {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(193, 68, 46, 0.38); }
+      50% { box-shadow: 0 0 0 7px rgba(193, 68, 46, 0); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .fc-node.current, .fc-node.fc-blocked.active { animation: none; }
+    }
+"""
+
+# Absolute-positioned nodes + an SVG line layer, laid out to match the
+# pipeline's real shape: request -> plan -> {market data | fundamentals |
+# documents} -> normalisation -> evidence store -> {analytics | segment
+# agents | technical appendix} -> synthesis -> QA -> (pass) {pdf | compact
+# pdf} / (blocked) withheld. Technical appendix and compact/full PDF are
+# genuinely concurrent in the pipeline now (see orchestrator.py), not just
+# drawn that way - the diagram matches the real asyncio.gather() calls.
+FLOWCHART_HTML = """
+<div class="fc-scroll"><div class="fc-wrap">
+  <svg class="fc-svg" viewBox="0 0 680 700">
+    <defs>
+      <marker id="fc-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" style="fill:var(--rule)"></path>
+      </marker>
+      <marker id="fc-arrow-pos" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" style="fill:var(--pos)"></path>
+      </marker>
+      <marker id="fc-arrow-neg" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" style="fill:var(--neg-border)"></path>
+      </marker>
+    </defs>
+    <g style="stroke:var(--rule);stroke-width:2;fill:none;">
+      <path d="M340,72 L340,86"></path>
+      <path d="M135,86 L545,86"></path>
+      <path d="M135,86 L135,100"></path>
+      <path d="M340,86 L340,100"></path>
+      <path d="M545,86 L545,100"></path>
+
+      <path d="M135,160 L135,174"></path>
+      <path d="M340,160 L340,174"></path>
+      <path d="M545,160 L545,174"></path>
+      <path d="M135,174 L545,174"></path>
+      <path d="M340,174 L340,186"></path>
+
+      <path d="M340,242 L340,270"></path>
+
+      <path d="M340,326 L340,340"></path>
+      <path d="M135,340 L545,340"></path>
+      <path d="M135,340 L135,354"></path>
+      <path d="M340,340 L340,354"></path>
+      <path d="M545,340 L545,354"></path>
+
+      <path d="M135,414 L135,428"></path>
+      <path d="M340,414 L340,428"></path>
+      <path d="M545,414 L545,428"></path>
+      <path d="M135,428 L545,428"></path>
+      <path d="M340,428 L340,440"></path>
+
+      <path d="M340,496 L340,524"></path>
+    </g>
+    <path d="M340,580 L340,605 M190,605 L490,605 M190,605 L190,620 M490,605 L490,620"
+          style="stroke:var(--pos);stroke-width:2;fill:none;" marker-end="url(#fc-arrow-pos)"></path>
+    <path d="M440,552 L480,552" style="stroke:var(--neg-border);stroke-width:2;fill:none;" marker-end="url(#fc-arrow-neg)"></path>
+    <text x="304" y="598" style="font:700 9.5px var(--font-ui);fill:var(--pos);">clears QA</text>
+    <text x="480" y="515" style="font:700 9.5px var(--font-ui);fill:var(--neg-ink);">critical findings</text>
+  </svg>
+
+  <div class="fc-node" data-key="planning" style="left:240px;top:16px;width:200px;height:56px;">
+    <div class="fc-name">Planning</div><div class="fc-blurb">Scope the research plan</div>
+  </div>
+
+  <div class="fc-node" data-key="acquisition" style="left:40px;top:100px;width:190px;height:60px;">
+    <div class="fc-name">Market data</div><div class="fc-blurb">Price, cap, multiples</div>
+  </div>
+  <div class="fc-node" data-key="acquisition" style="left:245px;top:100px;width:190px;height:60px;">
+    <div class="fc-name">Fundamentals</div><div class="fc-blurb">Financials &amp; KPIs</div>
+  </div>
+  <div class="fc-node" data-key="acquisition" style="left:450px;top:100px;width:190px;height:60px;">
+    <div class="fc-name">Documents</div><div class="fc-blurb">Filings, news, transcripts</div>
+  </div>
+
+  <div class="fc-node" data-key="normalisation" style="left:240px;top:186px;width:200px;height:56px;">
+    <div class="fc-name">Normalisation</div><div class="fc-blurb">Reconcile into canonical facts</div>
+  </div>
+
+  <div class="fc-node" data-key="evidence_ingestion" style="left:240px;top:270px;width:200px;height:56px;">
+    <div class="fc-name">Evidence store</div><div class="fc-blurb">Canonical facts, written</div>
+  </div>
+
+  <div class="fc-node" data-key="analysis" style="left:40px;top:354px;width:190px;height:60px;">
+    <div class="fc-name">Analytics engine</div><div class="fc-blurb">Growth, mix, surprise</div>
+  </div>
+  <div class="fc-node" data-key="analysis" style="left:245px;top:354px;width:190px;height:60px;">
+    <div class="fc-name">Segment agents</div><div class="fc-blurb">Per-section research</div>
+  </div>
+  <div class="fc-node" data-key="technical_appendix" style="left:450px;top:354px;width:190px;height:60px;">
+    <div class="fc-name">Technical appendix</div><div class="fc-blurb">Live OHLCV chart, independent of the draft</div>
+  </div>
+
+  <div class="fc-node" data-key="synthesis" style="left:240px;top:440px;width:200px;height:56px;">
+    <div class="fc-name">Synthesis</div><div class="fc-blurb">Draft narrative &amp; exhibits</div>
+  </div>
+
+  <div class="fc-node fc-gate" data-key="qa" style="left:240px;top:524px;width:200px;height:56px;">
+    <div class="fc-name">QA gate</div><div class="fc-blurb">Check every claim vs. evidence</div>
+  </div>
+  <div class="fc-node fc-blocked" data-key="__blocked" style="left:480px;top:524px;width:170px;height:56px;">
+    <div class="fc-name">Blocked</div><div class="fc-blurb">No PDF - fixes required</div>
+  </div>
+
+  <div class="fc-node" data-key="pdf" style="left:50px;top:620px;width:280px;height:60px;">
+    <div class="fc-name">Render PDF</div><div class="fc-blurb">Full report, merged with the technical appendix</div>
+  </div>
+  <div class="fc-node" data-key="compact_pdf" style="left:350px;top:620px;width:280px;height:60px;">
+    <div class="fc-name">Compact PDF</div><div class="fc-blurb">Two-page short version</div>
+  </div>
+</div></div>
 """
 
 APP_HTML = """
@@ -452,10 +611,7 @@ APP_HTML = """
 <body>
   <div class="shell">
     <div class="topbar">
-      <div>
-        <div class="wordmark">Equity<span class="hl">AI</span></div>
-        <div class="subtitle">AI-Powered Equity Research</div>
-      </div>
+      <div></div>
       <div class="tagline-top">Faster insights. Deeper decisions.</div>
     </div>
 
@@ -506,6 +662,12 @@ APP_HTML = """
         </div>
       </div>
     </div>
+
+    <div class="card map-card">
+      <h2>Workflow map</h2>
+      <p class="hint">The pipeline's real shape - parallel acquisition sources, parallel analysis, the QA pass/fail gate. Nodes glow live as your report moves through it.</p>
+      """ + FLOWCHART_HTML + """
+    </div>
   </div>
 
   <script>
@@ -544,6 +706,24 @@ APP_HTML = """
         </div>`;
       }).join("");
       document.getElementById("steps").innerHTML = html;
+    }
+
+    function applyFlowchart(job) {
+      const completed = new Set((job && job.completed_stages) || []);
+      const active = new Set((job && job.active_stages) || []);
+      document.querySelectorAll(".fc-node[data-key]").forEach(el => {
+        const key = el.dataset.key;
+        if (key === "__blocked") {
+          el.classList.toggle("active", !!(job && job.qa_critical));
+          return;
+        }
+        el.classList.remove("done", "current");
+        if (completed.has(key)) {
+          el.classList.add("done");
+        } else if (active.has(key)) {
+          el.classList.add("current");
+        }
+      });
     }
 
     function fmtSecs(ms) {
@@ -631,6 +811,7 @@ APP_HTML = """
       const job = await res.json();
       window.__lastJob = job;
       renderSteps(job);
+      applyFlowchart(job);
       renderViewer(job);
       const btn = document.getElementById("generate-btn");
       if (job.ticker) document.getElementById("ticker").value = job.ticker;
