@@ -24,7 +24,7 @@ applies. Additional paid web-search stages retain separate opt-in flags.
 | `EQR_CHECK_DATA_FRESHNESS` | `false` | Web-searches for the latest reported fiscal period | Compares canonical periods; only emits a notice/warning and never replaces MegaAPI data |
 | `EQR_VERIFY_METRIC_CONFLICTS` | `false` | Classifies definitions and web-verifies genuine same-fact conflicts | Detects the conflict, requires a dated URL matching a candidate, and retains the block if verification fails |
 | `EQR_QA_AUTO_REPAIR` | `true` | Rewrites statement-scoped unsupported prose | Deterministically validates the rewrite; omits the unsafe statement when necessary; cannot alter evidence or the verdict |
-| `EQR_WEB_FILL_GAPS` | `false` | Proposes facts for a thin section via web search, from allow-listed domains (plus the subject company's own site) only | A second, independent web-search call must confirm each fact before it is written to the Evidence Store; a third, independent web-search call re-confirms it again during QA, immediately before publication (`qa/web_claim_auditor.py`) - a fact unconfirmed at either check is dropped, never trusted |
+| `EQR_WEB_FILL_GAPS` | `false` | Proposes facts for a thin section via web search | A second, independent web-search call must confirm each fact - and, for a source off the allow-list/company-domain fast track, confirm the source's own legitimacy too; a third re-confirms it again during QA, immediately before publication (`qa/web_claim_auditor.py`) - a fact unconfirmed at any check is dropped, never trusted |
 
 The Analytics LLM pass is the clearest example of “LLM enabled but
 deterministic result”: code calculates the number first, the model only checks

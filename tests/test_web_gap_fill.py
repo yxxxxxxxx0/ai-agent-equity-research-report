@@ -91,7 +91,7 @@ class _FakeClient:
         )
 
 
-async def test_rejects_non_allowlisted_and_malformed_urls_before_verification():
+async def test_a_malformed_url_never_reaches_verification():
     reader = _reader()
     client = _FakeClient()
     result, items = await fill_evidence_gaps(
@@ -99,12 +99,27 @@ async def test_rejects_non_allowlisted_and_malformed_urls_before_verification():
         allowed_domains=_ALLOWED, max_claims=12, client=client,
     )
 
-    # Only the sec.gov candidate ever reaches the second, independent check.
-    assert len(client.verify_calls) == 1
-    assert "SEC EDGAR" in client.verify_calls[0]
-    assert result.claims_proposed == 1
-    assert any("not an allow-listed domain" in r for r in result.rejected_reasons)
+    # "not-a-real-url" has no http(s) scheme and is dropped before ever
+    # reaching verification; the off-allow-list candidate still gets its
+    # own independent check rather than being rejected on domain alone.
+    assert len(client.verify_calls) == 2
     assert any("no real URL" in r for r in result.rejected_reasons)
+
+
+async def test_an_off_allowlist_domain_must_pass_its_own_legitimacy_check():
+    reader = _reader()
+    client = _FakeClient()
+    result, items = await fill_evidence_gaps(
+        "run", "Example Corp", "EX", reader, None,
+        allowed_domains=_ALLOWED, max_claims=12, client=client,
+    )
+    # The verify prompt for the off-allow-list candidate must ask the
+    # independent verifier to judge source legitimacy itself.
+    blog_prompt = next(p for p in client.verify_calls if "Random Blog" in p)
+    assert "legitimate" in blog_prompt.lower()
+    # Its verifier response (not on the allow-list, and this fake client
+    # only confirms "SEC EDGAR" claims) correctly leaves it unconfirmed.
+    assert result.claims_verified == 1
 
 
 async def test_verified_candidate_becomes_citable_document_evidence():

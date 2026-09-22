@@ -11,12 +11,19 @@ proposing a fact is never itself trusted. Every candidate here goes through
 two independent gates before it becomes an Evidence Store row a segment agent
 can cite:
 
-1. It must resolve to a real, dated URL whose domain is on the configured
-   allow-list (regulatory filings, company newswires, major financial press -
-   never a blog, forum or aggregator).
-2. A second, independent model call must confirm - via its own live search -
-   that the URL is genuine and its content actually supports the claim. A
-   claim that fails either gate is dropped, never written.
+1. It must resolve to a real URL. A domain on the configured allow-list
+   (regulatory filings, company newswires, major financial press) or
+   recognisable as the subject company's own by name is fast-tracked; there
+   is no way to list every company's real domain in advance, though (a
+   ticker like "AAPL" shares no letters with "apple.com"), so anything else
+   is not rejected here - it is simply not yet trusted.
+2. A second, independent model call must confirm - via its own live search,
+   not a re-read of the first call's answer - that the URL is genuine and
+   its content actually supports the claim. For a candidate that skipped the
+   fast track, this call is also where source legitimacy itself gets
+   decided: the verifier is asked to confirm the source is the company's own
+   official site or a reputable outlet, never a blog, forum or content farm.
+   A claim that fails either check is dropped, never written.
 
 Accepted claims are written as ordinary ``EvidenceCategory.DOCUMENT`` rows,
 so they flow through the exact same path as MegadataAPI's own document
@@ -297,12 +304,17 @@ async def fill_evidence_gaps(
         if not url.startswith(("http://", "https://")):
             rejected.append(f"{topic}: no real URL returned")
             continue
-        if not _domain_allowed(url, allowed_domains, company):
-            rejected.append(f"{topic}: {urlparse(url).netloc} is not an allow-listed domain")
-            continue
         candidates.append({
             "topic": topic, "claim_text": claim_text, "source_name": source_name,
             "source_url": url, "published_date": row.get("published_date"),
+            # A domain on the curated list, or recognisable as the subject
+            # company's own site by name, needs no further scrutiny; anything
+            # else still gets a chance, but the independent verifier below is
+            # asked to confirm it is a legitimate source in its own right -
+            # a static list or a name-matching heuristic can't know every
+            # company's real domain (a ticker like "AAPL" shares no letters
+            # with "apple.com"), but a live search knows what apple.com is.
+            "domain_prevalidated": _domain_allowed(url, allowed_domains, company),
         })
 
     verified = await _verify_candidates(client, company, ticker, candidates)
@@ -329,18 +341,29 @@ async def _verify_candidates(
 ) -> list[dict[str, Any]]:
     """The second, independent check: each candidate is only kept if a fresh
     web search - not a re-read of the first call's own answer - confirms the
-    URL is real and actually supports the claim."""
+    URL is real and actually supports the claim. For a candidate whose
+    domain isn't already on the curated allow-list or recognisable as the
+    company's own by name, this call is also where source legitimacy itself
+    gets decided - by a live search, not a static list."""
     schema = {
         "verified": "true or false",
         "confirmed_published_date": "YYYY-MM-DD if the page states one, else null",
         "note": "one short sentence on what you found",
     }
+    legitimacy_instruction = (
+        "Also confirm this source itself is legitimate: either the subject company's own "
+        "official site (investor relations, newsroom, or a regulatory filing host), or a "
+        "major, reputable financial/business news publisher. If it is a blog, forum, "
+        "content farm, SEO aggregator, or any site you cannot confirm is one of those, set "
+        "verified=false regardless of whether the claim text itself seems accurate.\n"
+    )
     confirmed: list[dict[str, Any]] = []
     for candidate in candidates:
         prompt = (
             f"Company: {company} ({ticker or 'ticker unknown'})\n"
             f"Claim to verify: {candidate['claim_text']}\n"
             f"Claimed source: {candidate['source_name']} <{candidate['source_url']}>\n"
+            f"{'' if candidate.get('domain_prevalidated') else legitimacy_instruction}"
             f"Return this JSON shape: {schema}"
         )
         try:
