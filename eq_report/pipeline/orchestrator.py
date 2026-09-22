@@ -56,6 +56,7 @@ from ..rendering.technical_appendix import (
 from ..synthesis.llm_synthesizer import LLMSynthesizer
 from .freshness_check import FreshnessResult, check_freshness
 from .run_tracker import RunTracker, new_run_id
+from .web_gap_fill import WebGapFillResult, fill_evidence_gaps
 
 logger = get_logger("pipeline")
 
@@ -160,6 +161,7 @@ async def generate_report(
                 acquisition.market_data.observations,
                 acquisition.fundamentals.observations,
                 acquisition.documents.passages,
+                document_observations=acquisition.documents.observations,
             )
             _record_rejections(tracker, normalised)
             write_json(run_dir / "03_normalisation.json", {
@@ -203,6 +205,33 @@ async def generate_report(
                               error=f"{type(exc).__name__}: {exc}")
                     tracker.warn(
                         f"Data freshness check failed: {type(exc).__name__}: {exc}")
+
+        # 4.6 Web gap-fill (best-effort, opt-in) ---------------------------
+        # Also runs before analysis/synthesis, so a section MegadataAPI left
+        # thin gets a chance to become evidence-backed rather than omitted -
+        # see pipeline.web_gap_fill for the two-gate verification every
+        # candidate fact must pass before it is written to the store.
+        web_gap_fill_result = WebGapFillResult(attempted=False)
+        if settings.web_fill_gaps and settings.model.enabled:
+            with tracker.stage("web_gap_fill"):
+                try:
+                    web_gap_fill_result, new_items = await fill_evidence_gaps(
+                        report_run_id, reader.company, plan.ticker, reader, settings.model,
+                        allowed_domains=settings.web_fill_allowed_domains,
+                        max_claims=settings.web_fill_max_claims,
+                        tracker=usage_tracker,
+                    )
+                    if new_items:
+                        store.save(new_items)
+                        tracker.warn(
+                            f"Web research added {len(new_items)} source-verified fact(s) "
+                            f"for: {', '.join(web_gap_fill_result.topics_checked)}."
+                        )
+                except Exception as exc:  # noqa: BLE001 - never sink the run over this
+                    log_event(logger, logging.WARNING, "web gap-fill failed",
+                              error=f"{type(exc).__name__}: {exc}")
+                    tracker.warn(f"Web gap-fill failed: {type(exc).__name__}: {exc}")
+            write_json(run_dir / "04_6_web_gap_fill.json", web_gap_fill_result.to_dict())
 
         # 5. Analytics and segment agents, technical appendix ------------
         # The technical appendix is a live Bloomberg OHLCV fetch plus a
@@ -260,6 +289,9 @@ async def generate_report(
             if freshness.checked:
                 draft = replace(draft, metadata={
                     **draft.metadata, "freshness_check": freshness.to_dict()})
+            if web_gap_fill_result.attempted:
+                draft = replace(draft, metadata={
+                    **draft.metadata, "web_gap_fill": web_gap_fill_result.to_dict()})
 
         write_json(run_dir / "06_report_draft_initial.json", draft.to_dict())
 

@@ -117,6 +117,7 @@ class MegadataDocumentsProvider(_MegadataMixin, DocumentsProvider):
         data_results, search_results = await asyncio.gather(
             self._retrieve_many(data, plan), self._search_many(searches, plan))
         passages: list[RawDocumentPassage] = []
+        observations: list[RawObservation] = []
         errors: list[str] = []
         for result in [*data_results, *search_results]:
             if isinstance(result, BaseException):
@@ -124,7 +125,12 @@ class MegadataDocumentsProvider(_MegadataMixin, DocumentsProvider):
                 continue
             req, payload, url = result
             passages.extend(_extract_passages(payload, plan, req, url))
-        return self.ok(passages=tuple(passages), errors=tuple(errors))
+            observations.extend(_extract_structured_document_observations(
+                payload, plan, req, url))
+        return self.ok(
+            observations=tuple(observations), passages=tuple(passages),
+            errors=tuple(errors),
+        )
 
     async def _search_many(
         self, searches: tuple[SearchRequest, ...], plan: ResearchPlan,
@@ -315,7 +321,7 @@ def _extract_passages(
         source = SourceRef(
             source_id=f"megadata:{request.request_id}:{index}",
             source_name=str(original_name or "MegaAPI retrieved source"),
-            source_type=SourceType.NEWS,
+            source_type=_document_source_type(str(getattr(request, "endpoint", ""))),
             source_url=str(original_url) if original_url else None,
             retrieval_provider="MegaAPI", retrieval_url=url,
             original_source_name=str(original_name) if original_name else None,
@@ -332,3 +338,85 @@ def _extract_passages(
             metadata={"request_id": request.request_id, "purpose": request.purpose},
         ))
     return tuple(out)
+
+
+def _document_source_type(endpoint: str) -> SourceType:
+    """Classify a retrieved document by the endpoint that supplied it."""
+    if endpoint == "/api/alpha-vantage/earning-call-transcripts":
+        return SourceType.EARNINGS_CALL
+    if endpoint == "/api/alpha-vantage/earning-call-historical":
+        return SourceType.EARNINGS_RELEASE
+    if endpoint in {"/api/news/filings", "/api/news/filings-by-form"}:
+        return SourceType.COMPANY_FILING
+    if endpoint == "/api/alpha-vantage/earning-call-future":
+        return SourceType.COMPANY_ANNOUNCEMENT
+    return SourceType.NEWS
+
+
+def _extract_structured_document_observations(
+    payload: Any, plan: ResearchPlan, request: DataRequest | SearchRequest, url: str,
+) -> tuple[RawObservation, ...]:
+    """Turn machine-readable earnings history into canonicalizable facts.
+
+    The historical Alpha Vantage route returns rows such as ``reported_eps``
+    and ``estimated_eps``. Treating the entire response as document prose made
+    those fields invisible to the Evidence Store and left the report without a
+    latest reported period. Values remain provider-reported and retain the
+    retrieval URL and raw field name for auditability.
+    """
+    if request.endpoint != "/api/alpha-vantage/earning-call-historical":
+        return ()
+
+    root = payload.get("data", payload) if isinstance(payload, dict) else {}
+    if not isinstance(root, dict):
+        return ()
+
+    observations: list[RawObservation] = []
+    for raw_ticker, rows in root.items():
+        if not isinstance(rows, list):
+            continue
+        ticker = str(raw_ticker).upper()
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict):
+                continue
+            period_end = row.get("fiscal_date_ending")
+            reported_at = row.get("reported_date")
+            source = SourceRef(
+                source_id=f"megadata:{request.request_id}:{ticker}:{index}",
+                source_name="Alpha Vantage via MegaAPI",
+                source_type=SourceType.EARNINGS_RELEASE,
+                source_url=url,
+                retrieval_provider="MegaAPI",
+                retrieval_url=url,
+            )
+            common = {
+                "source": source,
+                "unit": "USD/share",
+                "currency": "USD",
+                "as_of": str(reported_at) if reported_at else None,
+                "period_end": str(period_end) if period_end else None,
+                "company": plan.company if ticker == plan.ticker else ticker,
+                "ticker": ticker,
+                "confidence": Confidence.HIGH,
+            }
+            if row.get("reported_eps") not in (None, ""):
+                observations.append(RawObservation(
+                    metric="reported_eps", value=row["reported_eps"],
+                    metadata={
+                        "basis": "reported",
+                        "request_id": request.request_id,
+                        "json_path": f"{ticker}.{index}.reported_eps",
+                    },
+                    **common,
+                ))
+            if row.get("estimated_eps") not in (None, ""):
+                observations.append(RawObservation(
+                    metric="estimated_eps", value=row["estimated_eps"],
+                    metadata={
+                        "basis": "consensus",
+                        "request_id": request.request_id,
+                        "json_path": f"{ticker}.{index}.estimated_eps",
+                    },
+                    **common,
+                ))
+    return tuple(observations)

@@ -146,6 +146,8 @@ class Normalizer:
         market_observations: tuple[RawObservation, ...] = (),
         fundamental_observations: tuple[RawObservation, ...] = (),
         document_passages: tuple[RawDocumentPassage, ...] = (),
+        *,
+        document_observations: tuple[RawObservation, ...] = (),
     ) -> NormalisationResult:
         """Normalise all three branches into one evidence set."""
         evidence: list[EvidenceItem] = []
@@ -156,6 +158,7 @@ class Normalizer:
         branches: tuple[tuple[str, tuple[RawObservation, ...], EvidenceCategory], ...] = (
             ("market_data", market_observations, EvidenceCategory.MARKET),
             ("fundamentals", fundamental_observations, EvidenceCategory.FUNDAMENTAL),
+            ("documents", document_observations, EvidenceCategory.FUNDAMENTAL),
         )
         llm_hints, hint_note = await self._llm_hints(branches)
         if hint_note:

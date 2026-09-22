@@ -363,10 +363,12 @@ class EvidenceStore:
         return tuple(row["period_label"] for row in rows)
 
     def latest_reported_period(self, report_run_id: str, ticker: str | None = None) -> str | None:
-        """The most recent period that has an actual reported revenue figure.
+        """The most recent period that has a reported revenue or EPS figure.
 
         Guidance and consensus rows carry future periods, so "latest period" is
-        defined by reported fundamentals, not by the maximum date in the table.
+        defined by reported actuals, not by the maximum date in the table.
+        Revenue remains preferred, but reported EPS is a safe fallback for
+        providers whose earnings-history route does not include revenue.
         """
         # Some providers supply a valid fiscal year/quarter label without a
         # calendar period-end date.  Those rows are still reported results and
@@ -375,7 +377,8 @@ class EvidenceStore:
         # leaving the narrative agents with little besides valuation snapshots.
         sql = (
             "SELECT period_label FROM evidence "
-            "WHERE report_run_id = ? AND metric = 'revenue' AND category = 'fundamental' "
+            "WHERE report_run_id = ? AND metric IN ('revenue', 'eps_diluted') "
+            "AND category = 'fundamental' "
             "AND period_label IS NOT NULL "
             "AND (period_end IS NOT NULL OR fiscal_year IS NOT NULL)"
         )
@@ -384,8 +387,9 @@ class EvidenceStore:
             sql += " AND ticker = ?"
             params.append(ticker.upper())
         sql += (
-            " ORDER BY fiscal_year DESC, COALESCE(fiscal_quarter, 5) DESC, "
-            "period_end DESC LIMIT 1"
+            " ORDER BY period_end DESC, fiscal_year DESC, "
+            "COALESCE(fiscal_quarter, 5) DESC, "
+            "CASE WHEN metric = 'revenue' THEN 0 ELSE 1 END LIMIT 1"
         )
         row = self._conn.execute(sql, params).fetchone()
         return row["period_label"] if row else None

@@ -25,7 +25,11 @@ from eq_report.normalisation.validation import (
     guidance_midpoint,
     validate_ratio,
 )
-from eq_report.providers.megadata import _extract_passages
+from eq_report.providers.megadata import (
+    _extract_passages,
+    _extract_structured_document_observations,
+)
+from eq_report.normalisation.canonical_metrics import canonicalise_metric
 from eq_report.qa.checks import has_asserted_numeric_fact
 
 
@@ -124,6 +128,40 @@ def test_original_source_replaces_vector_search_url():
     assert passage.source.retrieval_url.startswith("http://192.168.1.16")
 
 
+def test_earnings_history_becomes_structured_eps_evidence():
+    payload = {"MSFT": [{
+        "fiscal_date_ending": "2026-06-30",
+        "reported_date": "2026-07-29",
+        "reported_eps": "4.74",
+        "estimated_eps": "4.21",
+    }]}
+    req = SimpleNamespace(
+        request_id="earnings", purpose="history",
+        endpoint="/api/alpha-vantage/earning-call-historical",
+    )
+    plan = SimpleNamespace(company="Microsoft", ticker="MSFT")
+    rows = _extract_structured_document_observations(
+        payload, plan, req, "http://megadata/earnings")
+
+    assert [row.metric for row in rows] == ["reported_eps", "estimated_eps"]
+    assert [canonicalise_metric(row.metric)[0] for row in rows] == [
+        "eps_diluted", "consensus_eps"]
+    assert all(row.period_end == "2026-06-30" for row in rows)
+    assert all(row.source.source_type is SourceType.EARNINGS_RELEASE for row in rows)
+
+
+def test_transcript_endpoint_is_classified_as_earnings_call():
+    req = SimpleNamespace(
+        request_id="call", purpose="call",
+        endpoint="/api/alpha-vantage/earning-call-transcripts",
+    )
+    plan = SimpleNamespace(company="Microsoft", ticker="MSFT")
+    passage = _extract_passages(
+        [{"text": "Management discussed demand."}], plan, req,
+        "http://megadata/transcript")[0]
+    assert passage.source.source_type is SourceType.EARNINGS_CALL
+
+
 def test_derived_dependency_ids_are_preserved_in_metadata():
     row = replace(item("d", 17.6, metric="guidance_growth"),
                   source_type=SourceType.DERIVED,
@@ -147,6 +185,27 @@ def test_retrieved_document_number_cannot_enter_numeric_reader(tmp_path):
     store.save(reconcile([doc]))
     reader = EvidenceReader(store, "run", "SNDK", "Sandisk")
     assert reader.numeric("forward_pe") is None
+
+
+def test_eps_can_anchor_latest_reported_period_and_daily_prices_feed_chart(tmp_path):
+    store = EvidenceStore(tmp_path / "e.sqlite")
+    eps = replace(
+        item("eps", 4.74, metric="eps_diluted", period="Period ended 2026-06-30",
+             company="Microsoft", ticker="MSFT"),
+        period=FiscalPeriod(
+            "Period ended 2026-06-30", period_end=dt.date(2026, 6, 30)),
+        basis="reported",
+    )
+    price = replace(
+        item("px", 500, metric="share_price", company="Microsoft", ticker="MSFT"),
+        period=None, as_of=dt.date(2026, 9, 1),
+        metadata={"series": "daily_ohlc"},
+    )
+    store.save(reconcile([eps, price]))
+    reader = EvidenceReader(store, "run", "MSFT", "Microsoft")
+
+    assert reader.latest_reported_period() == "Period ended 2026-06-30"
+    assert reader.price_history() == (store.get("px"),)
 
 
 def test_metric_shape_collapses_array_indexes_for_small_llm_batches():

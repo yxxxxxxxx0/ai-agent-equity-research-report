@@ -372,6 +372,12 @@ class LLMSegmentAgent(SegmentAgent):
         # that is actually identical across agents - is placed first, and the
         # segment-specific instructions (which differ every call and would
         # otherwise break the shared prefix) are appended last.
+        split_instruction = (
+            "For this shared risk/catalyst segment, every risk finding must include the "
+            "exact tag 'risk' and every forward event or monitoring finding must include "
+            "the exact tag 'catalyst'; a finding may carry both tags.\n"
+            if self.segment is SegmentName.RISKS_CATALYSTS else ""
+        )
         return (
             f"Evidence candidates (semantically select and cite only the rows relevant "
             f"to the segment named below; only these ids may be cited): {evidence_rows}\n"
@@ -382,6 +388,7 @@ class LLMSegmentAgent(SegmentAgent):
             f"Company: {context.company} ({context.ticker or 'ticker unknown'})\n"
             f"Objective: {context.task.objective if context.task else ''}\n"
             f"Questions to address: {list(self.questions(context))}\n"
+            f"{split_instruction}"
         )
 
     # -- validation ----------------------------------------------------------
@@ -415,6 +422,9 @@ class LLMSegmentAgent(SegmentAgent):
                 materiality = max(1, min(3, int(row.get("materiality", 2))))
             except (TypeError, ValueError):
                 materiality = 2
+            tags = tuple(str(t) for t in row.get("tags", []))
+            if self.segment is SegmentName.RISKS_CATALYSTS:
+                tags = _risk_catalyst_tags(claim, tags)
             findings.append(KeyFinding(
                 claim=claim,
                 claim_type=claim_type,
@@ -424,7 +434,7 @@ class LLMSegmentAgent(SegmentAgent):
                     min(confidences, key=lambda c: _CONFIDENCE_ORDER[c]) if confidences
                     else Confidence.MEDIUM),
                 materiality=materiality,
-                tags=tuple(str(t) for t in row.get("tags", [])),
+                tags=tags,
             ))
 
         data_gaps = tuple(
@@ -475,6 +485,35 @@ def _validated_priority(raw: Any) -> str:
     renderer groups the Data Gaps table by exactly these three."""
     value = str(raw or "").strip().lower()
     return value if value in {"high", "medium", "low"} else "medium"
+
+
+def _risk_catalyst_tags(claim: str, tags: tuple[str, ...]) -> tuple[str, ...]:
+    """Guarantee the split risk/catalyst result can be rendered.
+
+    Model-authored semantic tags are intentionally free-form. The synthesizer,
+    however, serves the shared risk/catalyst agent into two report sections and
+    requires the stable ``risk`` and ``catalyst`` labels. Add those labels from
+    conservative language cues while preserving every model-supplied tag.
+    """
+    text = " ".join((claim, *tags)).lower()
+    risk_terms = (
+        "risk", "constraint", "dependency", "concentration", "competition",
+        "regulat", "exposure", "uncertain", "supply", "capital intensity",
+        "cash flow", "margin pressure",
+    )
+    catalyst_terms = (
+        "catalyst", "next", "upcoming", "guidance", "monitor", "indicator",
+        "test", "update", "adoption", "deployment", "capacity addition",
+        "subsequent",
+    )
+    stable = list(tags)
+    if any(term in text for term in risk_terms) and "risk" not in stable:
+        stable.append("risk")
+    if any(term in text for term in catalyst_terms) and "catalyst" not in stable:
+        stable.append("catalyst")
+    if "risk" not in stable and "catalyst" not in stable:
+        stable.append("risk")
+    return tuple(stable)
 
 
 class VerifiedSegmentAgent(SegmentAgent):

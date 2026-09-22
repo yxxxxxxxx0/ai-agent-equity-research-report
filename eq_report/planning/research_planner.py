@@ -135,7 +135,6 @@ _ENDPOINT_BRANCH = {
     "/api/market-tradestation/ohlcuvdv": "market_data",
     "/api/bbg/implied-move/data": "market_data",
     "/api/bbg/corporate-actions/data": "market_data",
-    "/api/bbg/indicators/data": "fundamentals",
     "/api/bbg/estimates/data": "fundamentals",
     "/api/bbg/segment-revenue/data": "fundamentals",
     "/api/bbg/supply-chain/data": "fundamentals",

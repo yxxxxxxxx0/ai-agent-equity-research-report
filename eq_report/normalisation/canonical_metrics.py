@@ -127,7 +127,7 @@ _register(PRICE_TO_SALES, "ps_ratio", "p_s")
 
 _register(CONSENSUS_REVENUE, "revenue_consensus", "street_revenue", "consensus_sales",
           "best_sales_mean")
-_register(CONSENSUS_EPS, "eps_consensus", "street_eps", "best_eps_mean")
+_register(CONSENSUS_EPS, "eps_consensus", "street_eps", "best_eps_mean", "estimated_eps")
 _register(CONSENSUS_RATING, "analyst_rating", "rating")
 _register(REVENUE_GROWTH_YOY_REPORTED, "revenue_growth_yoy_pct", "revenue_growth",
           "sales_growth", "revenue_growth_pct")
@@ -151,7 +151,7 @@ _register(NET_INCOME, "net_profit", "net_earnings", "profit_after_tax", "netInco
           "net_income_gaap")
 _register(NET_MARGIN, "net_margin_pct", "net_profit_margin", "prof_margin")
 _register(EPS_DILUTED, "eps", "diluted_eps", "earnings_per_share", "eps_diluted_gaap",
-          "diluted_eps_gaap", "is_diluted_eps")
+          "diluted_eps_gaap", "is_diluted_eps", "reported_eps")
 _register(OPERATING_CASH_FLOW, "cash_flow_from_operations", "cfo", "operating_cashflow",
           "cash_from_operating_activities", "cf_cash_from_oper")
 _register(CAPEX, "capital_expenditure", "capital_expenditures", "purchases_of_ppe",

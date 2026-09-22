@@ -123,6 +123,19 @@ class Settings:
     # whichever value seems more plausible. A genuine extra cost per conflict,
     # so it needs its own opt-in.
     verify_metric_conflicts: bool = False
+    # Best-effort live web research (see pipeline.web_gap_fill) to fill a
+    # section MegadataAPI left with too little evidence to write. Every
+    # candidate fact must resolve to a real, dated URL on an allow-listed
+    # domain (regulatory filings, company newswires, major financial press)
+    # and passes a second, independent verification call before it is
+    # written to the Evidence Store - it is never trusted on the first
+    # search alone. A genuine extra cost per run, so it needs its own opt-in.
+    web_fill_gaps: bool = False
+    web_fill_allowed_domains: tuple[str, ...] = (
+        "sec.gov", "prnewswire.com", "businesswire.com", "globenewswire.com",
+        "reuters.com", "bloomberg.com", "wsj.com", "ft.com", "apnews.com",
+    )
+    web_fill_max_claims: int = 12
     # Repair statement-scoped QA failures inside the same run. The model may
     # rewrite prose, but deterministic QA remains the publication gate; an
     # unsafe/unrepairable statement is omitted rather than waved through.
@@ -157,6 +170,16 @@ class Settings:
             provider_timeout_seconds=_env_int("PROVIDER_TIMEOUT_SECONDS", 20),
             check_data_freshness=_env_bool("CHECK_DATA_FRESHNESS", False),
             verify_metric_conflicts=_env_bool("VERIFY_METRIC_CONFLICTS", False),
+            web_fill_gaps=_env_bool("WEB_FILL_GAPS", False),
+            web_fill_allowed_domains=tuple(
+                d.strip().lower() for d in (
+                    _env("WEB_FILL_ALLOWED_DOMAINS",
+                         "sec.gov,prnewswire.com,businesswire.com,globenewswire.com,"
+                         "reuters.com,bloomberg.com,wsj.com,ft.com,apnews.com") or ""
+                ).split(",")
+                if d.strip()
+            ),
+            web_fill_max_claims=max(0, _env_int("WEB_FILL_MAX_CLAIMS", 12)),
             qa_auto_repair=_env_bool("QA_AUTO_REPAIR", True),
             qa_auto_repair_max_attempts=max(
                 0, _env_int("QA_AUTO_REPAIR_MAX_ATTEMPTS", 2)),
@@ -213,6 +236,9 @@ class Settings:
             "qa_auto_repair": self.qa_auto_repair,
             "qa_auto_repair_max_attempts": self.qa_auto_repair_max_attempts,
             "verify_metric_conflicts": self.verify_metric_conflicts,
+            "web_fill_gaps": self.web_fill_gaps,
+            "web_fill_allowed_domains": list(self.web_fill_allowed_domains),
+            "web_fill_max_claims": self.web_fill_max_claims,
             "technical_appendix": self.technical_appendix,
             "compact_report": self.compact_report,
             "planning_reasoning_effort": self.planning_reasoning_effort,

@@ -25,11 +25,15 @@ from .technical_appendix import build_technical_appendix_pdf, merge_technical_ap
 
 logger = get_logger("rendering.compact")
 
-NAVY = colors.HexColor("#12395e")
-INK = colors.HexColor("#1a1a1a")
-MUTED = colors.HexColor("#5c6470")
-RULE = colors.HexColor("#c8ccd4")
-PALE = colors.HexColor("#eef1f5")
+# Match the supplied NVDA teaser: deep ink typography, warm rust section
+# frames, and almost-white content cards rather than a dashboard palette.
+NAVY = colors.HexColor("#102e4a")
+INK = colors.HexColor("#171717")
+MUTED = colors.HexColor("#6a625c")
+RUST = colors.HexColor("#c94f10")
+RULE = RUST
+PALE = colors.HexColor("#f5f5f3")
+WARM_PALE = colors.HexColor("#fae2d5")
 WARN = colors.HexColor("#fdf3e0")
 
 
@@ -66,7 +70,7 @@ def _bullets(c: Canvas, x: float, y: float, width: float, texts: list[str], *,
     for text in texts:
         if not text:
             continue
-        c.setFillColor(NAVY)
+        c.setFillColor(RUST)
         # Align the marker to the first line's baseline instead of to the
         # preceding block's leading; this keeps every bullet visually level.
         c.circle(x + 2, y + 1.1, 1.1, fill=1, stroke=0)
@@ -83,18 +87,18 @@ _BAR_H = 14.0
 
 
 def _heading(c: Canvas, x: float, y: float, label: str, *, width: float = 535.0) -> float:
-    """A solid-filled title bar spanning the section's full width."""
-    c.setFillColor(NAVY)
-    c.rect(x, y - _BAR_H + 3, width, _BAR_H, fill=1, stroke=0)
+    """A warm, rounded title bar modelled on the supplied teaser."""
+    c.setFillColor(RUST)
+    c.roundRect(x, y - _BAR_H + 3, width, _BAR_H, 7, fill=1, stroke=0)
     c.setFillColor(colors.white)
-    c.setFont("Helvetica-Bold", 8.0)
-    c.drawString(x + 6, y - 7, label.upper())
+    c.setFont("Helvetica-Bold", 8.6)
+    c.drawCentredString(x + width / 2, y - 7, label)
     return y - _BAR_H - 5
 
 
 def _card(c: Canvas, x: float, y_top: float, width: float, height: float) -> None:
     """A light bordered box under a section bar, framing its content."""
-    c.setFillColor(colors.white)
+    c.setFillColor(PALE)
     c.setStrokeColor(RULE)
     c.setLineWidth(0.6)
     c.rect(x, y_top - height, width, height, fill=1, stroke=1)
@@ -164,7 +168,7 @@ def _table(c: Canvas, x: float, y: float, width: float, table: MetricTable) -> f
     columns = table.columns[:4]
     if not columns:
         return y
-    c.setFillColor(NAVY)
+    c.setFillColor(RUST)
     c.setFont("Helvetica-Bold", 6.7)
     c.drawString(x, y, table.title)
     y -= 10
@@ -177,7 +181,7 @@ def _table(c: Canvas, x: float, y: float, width: float, table: MetricTable) -> f
     col_starts: list[float] = [x]
     for col_width in col_widths[:-1]:
         col_starts.append(col_starts[-1] + col_width)
-    c.setFillColor(NAVY)
+    c.setFillColor(RUST)
     c.rect(x, y - 10, width, 10, fill=1, stroke=0)
     c.setFillColor(colors.white)
     c.setFont("Helvetica-Bold", 5.7)
@@ -201,25 +205,13 @@ def _table(c: Canvas, x: float, y: float, width: float, table: MetricTable) -> f
 
 
 def _render_brief(draft: ReportDraft, output_pdf: Path) -> None:
-    """A boxed-grid brief: a solid title bar plus a framed card per section,
-    each card sized ahead of drawing so its background never clips the text
-    painted on top of it afterward (see _bullet_block_height/_table_block_height)."""
+    """Render page one as the supplied teaser's stacked, rust-framed brief."""
     page_w, page_h = A4
     c = Canvas(str(output_pdf), pagesize=A4)
     c.setTitle(f"{draft.ticker} compact equity brief")
-    left_x, right_x, col_w = 30.0, 306.0, 252.0
-    full_w = page_w - 60
-
-    c.setFillColor(NAVY)
-    c.rect(0, page_h - 58, page_w, 58, fill=1, stroke=0)
-    c.setFillColor(colors.white)
-    c.setFont("Helvetica-Bold", 17)
-    c.drawString(30, page_h - 33, f"{draft.company} ({draft.ticker})")
-    c.setFont("Helvetica", 7.5)
-    c.drawRightString(page_w - 30, page_h - 31, f"Compact Equity Brief | {draft.report_date.isoformat()}")
-
-    y = page_h - 72
-    y = _key_data(c, draft, y)
+    left_x, gap, full_w = 18.0, 4.0, page_w - 36.0
+    col_w = (full_w - gap) / 2
+    right_x = left_x + col_w + gap
 
     company = next((s for s in draft.sections if s.title == "Company Snapshot"), None)
     # A thin/degraded run may omit Key Takeaways entirely - the brief should
@@ -238,35 +230,59 @@ def _render_brief(draft: ReportDraft, output_pdf: Path) -> None:
     monitoring = next((s for s in draft.sections if s.section == ReportSection.WHAT_MATTERS_NEXT), None)
     recent = next((s for s in draft.sections if s.title == "Recent Developments"), None)
 
-    # -- Company overview (full width) - the reference's "Quick Introduction" -
+    # Header: deliberately light and editorial, as in the reference PDF.
+    c.setFillColor(NAVY)
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(left_x, page_h - 28, "Compact Equity Brief")
+    c.setFont("Helvetica", 13.5)
+    c.setFillColor(INK)
+    c.drawString(left_x, page_h - 48, f"{draft.company} ({draft.ticker})")
+    c.setFont("Helvetica", 8.2)
+    c.setFillColor(MUTED)
+    c.drawString(left_x, page_h - 62, "Compact equity brief")
+    c.setFillColor(WARM_PALE)
+    c.roundRect(page_w - 178, page_h - 59, 160, 37, 9, fill=1, stroke=0)
+    c.setFillColor(NAVY)
+    c.setFont("Helvetica-Bold", 8.5)
+    c.drawCentredString(page_w - 98, page_h - 37, f"REPORT DATE: {draft.report_date.isoformat()}")
+    c.setStrokeColor(RUST)
+    c.setLineWidth(1.3)
+    c.line(left_x, page_h - 70, page_w - left_x, page_h - 70)
+
+    def panel(x: float, top: float, width: float, height: float, title: str) -> float:
+        bar_y = _heading(c, x, top, title, width=width)
+        _card(c, x, bar_y + 5, width, height)
+        return bar_y - 8
+
+    # Full-width introduction and summary mirror the two opening teaser boxes.
     intro_texts = [
         company.summary if company else "",
         company.statements[0].text if company and company.statements else "",
     ]
-    h = _bullet_block_height(intro_texts, size=6.55, max_lines=2)
-    bar_y = _heading(c, left_x, y, "Company overview", width=full_w)
-    _card(c, left_x, bar_y + 5, full_w, h)
-    y = _bullets(c, left_x + 4, bar_y - 2, full_w - 8, intro_texts, max_words=42, size=6.55, max_lines=2)
+    y = panel(left_x, page_h - 80, full_w, 94, "Company Overview")
+    _bullets(c, left_x + 5, y, full_w - 10, intro_texts, max_words=70, size=7.1, max_lines=3)
 
-    # -- Investment snapshot (full width) - the reference's "Summary" -
-    snapshot_texts = [s.text for s in (takeaways.statements[:3] if takeaways else ())]
-    h = _bullet_block_height(snapshot_texts, size=6.55, max_lines=2)
-    bar_y = _heading(c, left_x, y - 4, "Investment snapshot", width=full_w)
-    _card(c, left_x, bar_y + 5, full_w, h)
-    y = _bullets(c, left_x + 4, bar_y - 2, full_w - 8, snapshot_texts, max_words=42, size=6.55, max_lines=2)
+    snapshot_texts = [s.text for s in (takeaways.statements[:2] if takeaways else ())]
+    y = panel(left_x, page_h - 194, full_w, 65, "Investment Snapshot")
+    _bullets(c, left_x + 5, y, full_w - 10, snapshot_texts, max_words=66, size=6.65, max_lines=2)
 
-    # -- Key metrics & growth drivers (two columns of tables) -
-    bar_y = _heading(c, left_x, y - 4, "Key metrics & growth drivers", width=full_w)
+    # Two taller, side-by-side panels make room for data on the left and the
+    # financial narrative on the right, matching the reference's focal row.
     financial_table = financial.tables[0] if financial and financial.tables else None
-    drivers_table = drivers.tables[0] if drivers and drivers.tables else None
-    h = max(_table_block_height(financial_table), _table_block_height(drivers_table), 14)
-    _card(c, left_x, bar_y + 5, col_w, h)
-    _card(c, right_x, bar_y + 5, col_w, h)
-    left_y = _table(c, left_x + 4, bar_y - 2, col_w - 8, financial_table) if financial_table else bar_y
-    right_y = _table(c, right_x + 4, bar_y - 2, col_w - 8, drivers_table) if drivers_table else bar_y
-    y = min(left_y, right_y) - 6
+    y_left = panel(left_x, page_h - 278, col_w, 166, "Key Financial Metrics")
+    table_bottom = _table(c, left_x + 5, y_left, col_w - 10, financial_table) if financial_table else y_left
+    metric_notes = [s.text for s in (drivers.statements[:3] if drivers else ())]
+    _bullets(c, left_x + 5, table_bottom - 5, col_w - 10, metric_notes, max_words=28, size=5.85, max_lines=2)
+    y_right = panel(right_x, page_h - 278, col_w, 166, "Financial Performance & Operating Drivers")
+    financial_text = " ".join(filter(None, [
+        financial.summary if financial else "",
+        financial.statements[0].text if financial and financial.statements else "",
+    ]))
+    _paragraph(c, right_x + 5, y_right, col_w - 10, financial_text,
+               size=7.15, leading=8.6, max_lines=15)
 
-    # -- Competitive landscape & business risk (two columns) -
+    # The second two-up row follows the reference: landscape/risk left, a
+    # checkable forward-monitoring panel right (rather than unsourced sentiment).
     competitive_texts = [
         competitive.summary if competitive else "",
         competitive.statements[0].text if competitive and competitive.statements else "",
@@ -275,75 +291,29 @@ def _render_brief(draft: ReportDraft, output_pdf: Path) -> None:
         risks.statements[0].text if risks and risks.statements else "",
         risks.statements[1].text if risks and len(risks.statements) > 1 else "",
     ]
-    h = max(_bullet_block_height(competitive_texts), _bullet_block_height(risk_texts))
-    bar_y = _heading(c, left_x, y - 4, "Competitive landscape & business risk", width=full_w)
-    c.setFillColor(NAVY); c.setFont("Helvetica-Bold", 6.6)
-    c.drawString(left_x + 4, bar_y - 8, "Competitive landscape")
-    c.drawString(right_x + 4, bar_y - 8, "Business risk")
-    _card(c, left_x, bar_y + 5, col_w, h + 10)
-    _card(c, right_x, bar_y + 5, col_w, h + 10)
-    left_y = _bullets(c, left_x + 4, bar_y - 18, col_w - 8, competitive_texts, max_words=28)
-    right_y = _bullets(c, right_x + 4, bar_y - 18, col_w - 8, risk_texts, max_words=28)
-    y = min(left_y, right_y) - 6
+    y_left = panel(left_x, page_h - 464, col_w, 152, "Competitive Landscape & Business Risk")
+    _bullets(c, left_x + 5, y_left, col_w - 10, competitive_texts + risk_texts,
+             max_words=32, size=6.5, max_lines=3)
 
-    # -- What matters next & recent developments (two columns) -
-    # "What matters next" (checkable, evidence-scoped forward catalysts) takes
-    # the slot a sentiment/social box would otherwise occupy in this layout -
-    # the report states no market sentiment gauge, by design.
     watch_texts = [s.text for s in ((monitoring.statements[:2] if monitoring else ()))]
     recent_texts = [s.text for s in (recent.statements[:2] if recent else ())]
-    h = max(_bullet_block_height(watch_texts), _bullet_block_height(recent_texts))
-    bar_y = _heading(c, left_x, y - 4, "What matters next & recent developments", width=full_w)
-    c.setFillColor(NAVY); c.setFont("Helvetica-Bold", 6.6)
-    c.drawString(left_x + 4, bar_y - 8, "What matters next")
-    c.drawString(right_x + 4, bar_y - 8, "Recent developments")
-    _card(c, left_x, bar_y + 5, col_w, h + 10)
-    _card(c, right_x, bar_y + 5, col_w, h + 10)
-    left_y = _bullets(c, left_x + 4, bar_y - 18, col_w - 8, watch_texts, max_words=29)
-    right_y = _bullets(c, right_x + 4, bar_y - 18, col_w - 8, recent_texts, max_words=34)
-    y = min(left_y, right_y) - 6
+    y_right = panel(right_x, page_h - 464, col_w, 152, "What Matters Next & Recent Developments")
+    _bullets(c, right_x + 5, y_right, col_w - 10, watch_texts + recent_texts,
+             max_words=34, size=6.5, max_lines=3)
 
-    # -- Peer comparison (full-width table, then a two-column caveat) -
-    peer_table = competitive.tables[0] if competitive and competitive.tables else None
-    if peer_table:
-        bar_y = _heading(c, left_x, y - 4, "Peer comparison", width=full_w)
-        limitations_text = (
-            "The comparison is not like-for-like: the available evidence does not provide "
-            "peer segment mix, margins, earnings growth, product exposure, regional mix or "
-            "capital intensity, so it cannot attribute the valuation gap to any one driver."
-        )
-        h = _table_block_height(peer_table) + _bullet_block_height([limitations_text], size=5.95, max_lines=3)
-        _card(c, left_x, bar_y + 5, full_w, h)
-        table_y = _table(c, left_x + 4, bar_y - 2, full_w - 8, peer_table) - 3
-        footer_y = _bullets(c, left_x + 4, table_y, full_w - 8, [limitations_text],
-                            max_words=38, size=5.95, max_lines=3)
-    else:
-        footer_y = y
-
-    # Use otherwise-empty lower-page space for additional cited evidence - the
-    # reference's "News" box, filled from this report's own sourced statements
-    # rather than an unattributed feed.
-    if footer_y > 105:
-        used = {
-            statement.text for section in draft.sections
-            for statement in section.statements[:2]
-        }
-        candidates = [
-            statement.text for section in draft.sections
-            for statement in section.statements[2:]
-            if statement.text not in used
-        ]
-        if candidates:
-            capacity = max(1, min(6, int((footer_y - 48) / 18)))
-            picked = candidates[:capacity]
-            h = _bullet_block_height(picked, size=6.2, max_lines=2)
-            bar_y = _heading(c, left_x, footer_y, "Additional evidence", width=full_w)
-            _card(c, left_x, bar_y + 5, full_w, h)
-            footer_y = _bullets(c, left_x + 4, bar_y - 2, full_w - 8, picked, max_words=40, size=6.2, max_lines=2)
+    # The bottom full-width box follows the reference's news treatment, but
+    # is populated only by report statements already supported by evidence.
+    used = {text for text in intro_texts + snapshot_texts + competitive_texts + risk_texts + watch_texts + recent_texts if text}
+    candidates = [
+        statement.text for section in draft.sections for statement in section.statements[2:]
+        if statement.text not in used
+    ]
+    y = panel(left_x, page_h - 634, full_w, 126, "Additional Evidence")
+    _bullets(c, left_x + 5, y, full_w - 10, candidates[:5], max_words=62, size=6.3, max_lines=2)
 
     c.setFillColor(MUTED)
     c.setFont("Helvetica", 5.8)
-    c.drawRightString(page_w - 30, 17, "Page 1 of 2 | Compact version of the full structured report")
+    c.drawRightString(page_w - left_x, 17, "Page 1 of 2 | Compact version of the full structured report")
     c.save()
 
 

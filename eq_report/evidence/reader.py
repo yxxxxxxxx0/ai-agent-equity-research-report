@@ -91,7 +91,14 @@ class EvidenceReader:
 
     def price_history(self) -> tuple[EvidenceItem, ...]:
         """Historical closing prices, oldest first."""
-        return self.series("price_history_point", "price_history")
+        history = self.series("price_history_point", "price_history")
+        if history:
+            return history
+        # Megadata's OHLCV/indicator records use the canonical share_price
+        # metric and carry the generic daily-series marker. Keep those points
+        # available to the chart and snapshot instead of requiring a second,
+        # provider-specific metric name.
+        return self.series("share_price", "daily_ohlc")
 
     def daily_highs(self) -> tuple[EvidenceItem, ...]:
         """Daily high prices (one per trading day), oldest first."""

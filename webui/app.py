@@ -842,7 +842,10 @@ APP_HTML = """
     }
 
     function fmtSecs(ms) {
-      return Math.max(0, Math.round(ms / 1000)) + "s";
+      const totalSeconds = Math.max(0, Math.round(ms / 1000));
+      const minutes = Math.floor(totalSeconds / 60);
+      const seconds = totalSeconds % 60;
+      return minutes + "m " + String(seconds).padStart(2, "0") + "s";
     }
 
     function tickTimes() {
