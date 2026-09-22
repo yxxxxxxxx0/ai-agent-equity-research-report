@@ -187,7 +187,7 @@ async def fill_evidence_gaps(
         return WebGapFillResult(attempted=False), []
     schema = {
         "claims": [{
-            "topic": sorted(topics),
+            "topic": "exactly one of: " + "|".join(sorted(topics)),
             "claim_text": "one short factual sentence",
             "source_name": "the publisher or site name",
             "source_url": "the exact URL of the page you found this on",
@@ -216,7 +216,12 @@ async def fill_evidence_gaps(
     for row in raw_claims[:max_claims]:
         if not isinstance(row, dict):
             continue
-        topic = str(row.get("topic", "")).strip()
+        raw_topic = row.get("topic", "")
+        # Defensive: a model has been observed echoing the schema's own
+        # enum-hint list back as the value instead of picking one member.
+        if isinstance(raw_topic, list):
+            raw_topic = next((t for t in raw_topic if t in topics), "")
+        topic = str(raw_topic).strip()
         claim_text = str(row.get("claim_text", "")).strip()
         url = str(row.get("source_url", "")).strip()
         source_name = str(row.get("source_name", "")).strip()

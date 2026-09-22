@@ -107,6 +107,35 @@ async def test_unverified_candidate_is_never_written():
     assert items == []
 
 
+async def test_topic_echoed_back_as_a_list_is_still_recognised():
+    """Regression test: a model has been observed echoing the schema's own
+    enum-hint list back as the value instead of picking one member."""
+    reader = _reader()
+
+    class _ListTopicClient:
+        async def complete_json(self, _system, prompt, *, web_search=False, stage="", **_kw):
+            if stage == "web_gap_fill_search":
+                return LLMJSONResponse(payload={"claims": [{
+                    "topic": ["company_snapshot"],
+                    "claim_text": "Example Corp designs enterprise software.",
+                    "source_name": "SEC EDGAR",
+                    "source_url": "https://www.sec.gov/example-10k",
+                    "published_date": "2026-08-01",
+                }]}, input_tokens=1, output_tokens=1)
+            return LLMJSONResponse(
+                payload={"verified": True, "confirmed_published_date": "2026-08-01"},
+                input_tokens=1, output_tokens=1,
+            )
+
+    result, items = await fill_evidence_gaps(
+        "run", "Example Corp", "EX", reader, None,
+        allowed_domains=_ALLOWED, max_claims=12, client=_ListTopicClient(),
+    )
+    assert result.claims_proposed == 1
+    assert len(items) == 1
+    assert items[0].metadata["gap_fill_topic"] == "company_snapshot"
+
+
 async def test_well_served_report_never_calls_the_model():
     reader = _reader()
     reader.store.save([])  # nothing to seed; simulate a well-served run instead:
