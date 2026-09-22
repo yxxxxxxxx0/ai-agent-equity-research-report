@@ -141,7 +141,12 @@ def _tracked_stage(self, name):  # noqa: ANN001 - mirrors RunTracker.stage's sig
                         active.remove(name)
                     if name not in job["completed_stages"]:
                         job["completed_stages"].append(name)
-                    job.setdefault("stage_completed_at", {})[name] = time.time()
+                    completed_at = time.time()
+                    job.setdefault("stage_completed_at", {})[name] = completed_at
+                    started_at = job.setdefault("stage_first_started_at", {}).get(name)
+                    if started_at is not None:
+                        job.setdefault("stage_durations_ms", {})[name] = round(
+                            (completed_at - started_at) * 1000, 1)
 
 
 run_tracker_module.RunTracker.stage = _tracked_stage
@@ -226,6 +231,15 @@ def _run_job(job_id: str, ticker: str, report_date: dt.date) -> None:
                 for check, count in sorted(counts.items(), key=lambda kv: -kv[1])
             ]
         with _JOBS_LOCK:
+            # Prefer the pipeline tracker's own UTC timings once the run is
+            # complete. The live wrapper above supplies the same values while
+            # a job is running; these become the durable final record exposed
+            # by /api/job/<id> and shown after refresh.
+            stage_durations = {
+                stage.stage: round(stage.duration_ms, 1)
+                for stage in (result.run.stages if result.run else [])
+                if stage.duration_ms is not None
+            }
             JOBS[job_id].update(
                 status="done" if (result.succeeded and result.compact_pdf_path) else "failed",
                 report_run_id=result.report_run_id,
@@ -238,6 +252,7 @@ def _run_job(job_id: str, ticker: str, report_date: dt.date) -> None:
                 input_tokens=usage.get("total_input_tokens"),
                 output_tokens=usage.get("total_output_tokens"),
                 usage_by_stage=usage.get("by_stage") or {},
+                stage_durations_ms=stage_durations,
                 qa_critical=len(qa.critical) if qa else None,
                 qa_warnings=len(qa.warnings) if qa else None,
                 qa_reasons=qa_reasons,
@@ -255,6 +270,10 @@ def _run_job(job_id: str, ticker: str, report_date: dt.date) -> None:
                 error=f"{exc}\n\n{traceback.format_exc(limit=4)}",
             )
     finally:
+        with _JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job is not None and job.get("status") in {"done", "failed"}:
+                job.setdefault("completed_at", time.time())
         _THREAD_JOB.pop(threading.get_ident(), None)
 
 
@@ -267,6 +286,9 @@ def _start_job(ticker: str, report_date: dt.date) -> str:
             "status": "queued",
             "active_stages": [],
             "completed_stages": [],
+            "stage_first_started_at": {},
+            "stage_completed_at": {},
+            "stage_durations_ms": {},
         }
     threading.Thread(target=_run_job, args=(job_id, ticker, report_date), daemon=True).start()
     return job_id
@@ -544,6 +566,15 @@ APP_STYLE = """
       font-family: var(--font-mono); font-size: 10px; font-weight: 700; padding: 2px 6px;
       border-radius: 99px; line-height: 1.3; box-shadow: 0 1px 2px rgba(16,24,40,0.25);
     }
+    .fc-time {
+      position: absolute; right: 6px; bottom: 4px; color: var(--faint);
+      font-family: var(--font-mono); font-size: 9.5px; font-weight: 700;
+      line-height: 1; font-variant-numeric: tabular-nums;
+      background: color-mix(in srgb, var(--card-bg) 82%, transparent);
+      padding-left: 3px;
+    }
+    .fc-node.current .fc-time { color: var(--accent); }
+    .fc-node.done .fc-time { color: var(--pos); }
 
     /* Overall telemetry - elapsed/cost/tokens, anchored to server timestamps
        (see updateTelemetry) so a refresh never resets the clock. */
@@ -753,10 +784,35 @@ APP_HTML = """
     // stage starts). A tick just recomputes Date.now() - <server time>, so
     // refreshing the page mid-run shows the same true elapsed time instead
     // of restarting every clock at 0.
-    function groupStartMs(job, stages) {
-      if (!job || !job.stage_first_started_at) return null;
-      const times = stages.map(s => job.stage_first_started_at[s]).filter(t => t != null);
-      return times.length ? Math.min(...times) * 1000 : null;
+    function stageElapsedMs(job, stage) {
+      if (!job) return null;
+      const recorded = job.stage_durations_ms && job.stage_durations_ms[stage];
+      if (recorded != null) return recorded;
+      const started = job.stage_first_started_at && job.stage_first_started_at[stage];
+      if (started == null) return null;
+      const completed = job.stage_completed_at && job.stage_completed_at[stage];
+      return Math.max(0, ((completed != null ? completed * 1000 : Date.now()) - started * 1000));
+    }
+
+    function groupElapsedMs(job, stages) {
+      if (!job || !stages.length) return null;
+      const starts = stages
+        .map(stage => job.stage_first_started_at && job.stage_first_started_at[stage])
+        .filter(value => value != null);
+      if (!starts.length) return null;
+      const allComplete = stages.every(stage =>
+        job.stage_completed_at && job.stage_completed_at[stage] != null);
+      const endMs = allComplete
+        ? Math.max(...stages.map(stage => job.stage_completed_at[stage])) * 1000
+        : Date.now();
+      return Math.max(0, endMs - Math.min(...starts) * 1000);
+    }
+
+    function finalizingElapsedMs(job) {
+      const started = job && job.stage_completed_at && job.stage_completed_at.compact_pdf;
+      if (started == null) return null;
+      const ended = job.completed_at != null ? job.completed_at * 1000 : Date.now();
+      return Math.max(0, ended - started * 1000);
     }
 
     function renderSteps(job) {
@@ -772,16 +828,15 @@ APP_HTML = """
         const finalizingCurrent = isFinalizing && !done && job && job.status === "running"
           && STEP_GROUPS.slice(0, -1).every(g => g[3].every(s => completed.has(s)));
         const cls = (groupDone || finalizingDone) ? "done" : (isCurrent || finalizingCurrent) ? "current" : "";
-        const startMs = isFinalizing
-          ? ((job && job.stage_completed_at && job.stage_completed_at.compact_pdf) || null) * 1000 || null
-          : groupStartMs(job, stages);
-        const showTime = cls === "current" && startMs;
+        const elapsedMs = isFinalizing
+          ? finalizingElapsedMs(job)
+          : groupElapsedMs(job, stages);
         return `<div class="step ${cls}" data-key="${key}">
           <div class="step-dot"></div>
           <div class="step-body">
             <div class="step-title-row">
               <span class="step-title">${title}</span>
-              <span class="step-time" data-key="${key}">${showTime ? fmtSecs(Date.now() - startMs) : ""}</span>
+              <span class="step-time" data-key="${key}">${elapsedMs != null ? fmtSecs(elapsedMs) : ""}</span>
             </div>
             <div class="step-desc">${desc}</div>
           </div>
@@ -805,6 +860,25 @@ APP_HTML = """
         } else if (active.has(key)) {
           el.classList.add("current");
         }
+      });
+      renderTimeByLayer(job);
+    }
+
+    function renderTimeByLayer(job) {
+      document.querySelectorAll(".fc-node[data-key]").forEach(node => {
+        let badge = node.querySelector(".fc-time");
+        const key = node.dataset.key;
+        const elapsed = key === "__blocked" ? null : stageElapsedMs(job, key);
+        if (elapsed == null) {
+          if (badge) badge.remove();
+          return;
+        }
+        if (!badge) {
+          badge = document.createElement("div");
+          badge.className = "fc-time";
+          node.appendChild(badge);
+        }
+        badge.textContent = fmtSecs(elapsed);
       });
     }
 
@@ -852,15 +926,14 @@ APP_HTML = """
       const job = window.__lastJob || null;
       document.querySelectorAll(".step-time[data-key]").forEach(el => {
         const key = el.dataset.key;
-        const row = el.closest(".step");
-        if (!row.classList.contains("current")) return;
         const group = STEP_GROUPS.find(g => g[0] === key);
         if (!group) return;
-        const startMs = key === "finalizing"
-          ? ((job && job.stage_completed_at && job.stage_completed_at.compact_pdf) || null) * 1000 || null
-          : groupStartMs(job, group[3]);
-        if (startMs) el.textContent = fmtSecs(Date.now() - startMs);
+        const elapsed = key === "finalizing"
+          ? finalizingElapsedMs(job)
+          : groupElapsedMs(job, group[3]);
+        if (elapsed != null) el.textContent = fmtSecs(elapsed);
       });
+      renderTimeByLayer(job);
       updateTelemetry(job);
     }
 
