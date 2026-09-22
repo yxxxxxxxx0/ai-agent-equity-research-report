@@ -748,7 +748,11 @@ class PdfReportRenderer:
         story += self._section_heading(index, section.title, styles)
 
         if section.summary:
-            story.append(Paragraph(_escape(section.summary), styles["summary"]))
+            refs = "".join(
+                f'<a href="#cite_{ref}" color="{ACCENT_HEX}">[{ref}]</a>'
+                for ref in section.summary_citation_refs
+            )
+            story.append(Paragraph(f"{_escape(section.summary)} {refs}", styles["summary"]))
 
         for paragraph in section.paragraphs:
             block = [Paragraph(_escape(paragraph), styles["body"])]

@@ -66,7 +66,10 @@ class CitationRegistry:
             ref_number=number,
             evidence_id=item.evidence_id,
             text=text,
-            source_url=item.original_source_url or item.source_url,
+            # API observations do not always have a publisher landing page;
+            # their immutable retrieval URL is still the trace back to the
+            # data provider and is preferable to an unlinked citation.
+            source_url=item.original_source_url or item.source_url or item.retrieval_url,
         )
 
     @property

@@ -29,6 +29,9 @@ def load_report_json(path: Path | str) -> tuple[ReportDraft, QAResult]:
     sections = tuple(ReportSectionDraft(
         section=ReportSection(row["section"]), title=row["title"],
         summary=row.get("summary", ""),
+        summary_evidence_ids=tuple(row.get("summary_evidence_ids", [])),
+        summary_analytics_ids=tuple(row.get("summary_analytics_ids", [])),
+        summary_citation_refs=tuple(row.get("summary_citation_refs", [])),
         statements=tuple(Statement(
             text=item["text"], claim_type=ClaimType(item["claim_type"]),
             evidence_ids=tuple(item.get("evidence_ids", [])),

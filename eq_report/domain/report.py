@@ -169,6 +169,12 @@ class ReportSectionDraft:
     section: ReportSection
     title: str
     summary: str = ""
+    # A standfirst is still a factual editorial claim, not decorative copy.
+    # Keep its provenance separate from the body statements so it is rendered
+    # with a source marker and can be checked just like every bullet.
+    summary_evidence_ids: tuple[str, ...] = ()
+    summary_analytics_ids: tuple[str, ...] = ()
+    summary_citation_refs: tuple[int, ...] = ()
     statements: tuple[Statement, ...] = ()
     paragraphs: tuple[str, ...] = ()
     tables: tuple[MetricTable, ...] = ()
@@ -179,6 +185,9 @@ class ReportSectionDraft:
             "section": self.section.value,
             "title": self.title,
             "summary": self.summary,
+            "summary_evidence_ids": list(self.summary_evidence_ids),
+            "summary_analytics_ids": list(self.summary_analytics_ids),
+            "summary_citation_refs": list(self.summary_citation_refs),
             "statements": [s.to_dict() for s in self.statements],
             "paragraphs": list(self.paragraphs),
             "tables": [t.to_dict() for t in self.tables],

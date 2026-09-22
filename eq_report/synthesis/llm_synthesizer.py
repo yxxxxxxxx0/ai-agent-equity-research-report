@@ -354,6 +354,15 @@ JSON only."""
             section=ReportSection.KEY_TAKEAWAYS,
             title="Key Takeaways",
             summary=summary,
+            summary_evidence_ids=tuple(dict.fromkeys(
+                evidence_id for statement in statements for evidence_id in statement.evidence_ids
+            )),
+            summary_analytics_ids=tuple(dict.fromkeys(
+                analytics_id for statement in statements for analytics_id in statement.analytics_ids
+            )),
+            summary_citation_refs=self.citations.refs_for(tuple(dict.fromkeys(
+                evidence_id for statement in statements for evidence_id in statement.evidence_ids
+            ))),
             statements=statements,
         )
 

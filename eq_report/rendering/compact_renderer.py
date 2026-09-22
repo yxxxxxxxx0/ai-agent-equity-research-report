@@ -8,6 +8,7 @@ same calculations and chart captions as the full report.
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 from reportlab.lib import colors
@@ -54,10 +55,21 @@ def _paragraph(c: Canvas, x: float, y: float, width: float, text: str, *,
 
 def _short(text: str, max_words: int = 34) -> str:
     """Keep a report statement readable in a compact bullet layout."""
-    words = " ".join(text.split()).split()
+    text = " ".join(text.split())
+    # Keep source markers even when the prose has to be shortened; otherwise
+    # the compact layout would silently sever a claim from its provenance.
+    match = re.search(r"((?:\s*\[\d+\])+)$", text)
+    refs = match.group(1).replace(" ", "") if match else ""
+    body = text[:match.start()].rstrip() if match else text
+    words = body.split()
     if len(words) <= max_words:
-        return " ".join(words)
-    return " ".join(words[:max_words]).rstrip(".,;:") + "..."
+        return " ".join(words) + refs
+    return " ".join(words[:max_words]).rstrip(".,;:") + "..." + refs
+
+
+def _cited_text(text: str, refs: tuple[int, ...]) -> str:
+    """Append the full report's stable source references to compact prose."""
+    return text + (" " + "".join(f"[{ref}]" for ref in refs) if refs else "")
 
 
 def _bullets(c: Canvas, x: float, y: float, width: float, texts: list[str], *,
@@ -316,34 +328,44 @@ def _render_brief(draft: ReportDraft, output_pdf: Path) -> None:
 
     # -- content, and only the content that actually exists ----------------
     intro_texts = [t for t in [
-        company.summary if company else "",
-        company.statements[0].text if company and company.statements else "",
+        _cited_text(company.summary, company.summary_citation_refs) if company else "",
+        _cited_text(company.statements[0].text, company.statements[0].citation_refs)
+        if company and company.statements else "",
     ] if t]
-    snapshot_texts = [s.text for s in (takeaways.statements[:2] if takeaways else ())]
+    snapshot_texts = [_cited_text(s.text, s.citation_refs)
+                      for s in (takeaways.statements[:2] if takeaways else ())]
     financial_table = financial.tables[0] if financial and financial.tables else None
-    metric_notes = [s.text for s in (drivers.statements[:3] if drivers else ())]
+    metric_notes = [_cited_text(s.text, s.citation_refs)
+                    for s in (drivers.statements[:3] if drivers else ())]
     financial_text = " ".join(filter(None, [
-        financial.summary if financial else "",
-        financial.statements[0].text if financial and financial.statements else "",
+        _cited_text(financial.summary, financial.summary_citation_refs) if financial else "",
+        _cited_text(financial.statements[0].text, financial.statements[0].citation_refs)
+        if financial and financial.statements else "",
     ]))
     competitive_texts = [t for t in [
-        competitive.summary if competitive else "",
-        competitive.statements[0].text if competitive and competitive.statements else "",
+        _cited_text(competitive.summary, competitive.summary_citation_refs) if competitive else "",
+        _cited_text(competitive.statements[0].text, competitive.statements[0].citation_refs)
+        if competitive and competitive.statements else "",
     ] if t]
     risk_texts = [t for t in [
-        risks.statements[0].text if risks and risks.statements else "",
-        risks.statements[1].text if risks and len(risks.statements) > 1 else "",
+        _cited_text(risks.statements[0].text, risks.statements[0].citation_refs)
+        if risks and risks.statements else "",
+        _cited_text(risks.statements[1].text, risks.statements[1].citation_refs)
+        if risks and len(risks.statements) > 1 else "",
     ] if t]
-    watch_texts = [s.text for s in (monitoring.statements[:2] if monitoring else ())]
-    recent_texts = [s.text for s in (recent.statements[:2] if recent else ())]
+    watch_texts = [_cited_text(s.text, s.citation_refs)
+                   for s in (monitoring.statements[:2] if monitoring else ())]
+    recent_texts = [_cited_text(s.text, s.citation_refs)
+                    for s in (recent.statements[:2] if recent else ())]
 
     used = {
         t for t in intro_texts + snapshot_texts + competitive_texts + risk_texts
         + watch_texts + recent_texts if t
     }
     candidates = [
-        statement.text for section in draft.sections for statement in section.statements[2:]
-        if statement.text not in used
+        _cited_text(statement.text, statement.citation_refs)
+        for section in draft.sections for statement in section.statements[2:]
+        if _cited_text(statement.text, statement.citation_refs) not in used
     ][:5]
 
     # -- layout: each block reports its own height, 0 meaning "skip me" ----

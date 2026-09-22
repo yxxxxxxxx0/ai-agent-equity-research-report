@@ -316,12 +316,24 @@ class Synthesizer:
             ]
         statements = self._statements(findings)
 
+        summary_evidence_ids = tuple(dict.fromkeys(
+            evidence_id for statement in statements for evidence_id in statement.evidence_ids
+        ))
+        summary_analytics_ids = tuple(dict.fromkeys(
+            analytics_id for statement in statements for analytics_id in statement.analytics_ids
+        ))
         return ReportSectionDraft(
             section=section,
             title=title,
             summary=self._section_summary(section, result),
+            summary_evidence_ids=summary_evidence_ids,
+            summary_analytics_ids=summary_analytics_ids,
+            summary_citation_refs=self.citations.refs_for(summary_evidence_ids),
             statements=statements,
-            paragraphs=self._paragraphs(section, result),
+            # Free-form segment narratives have no sentence-level provenance.
+            # Findings retain their source IDs, so publish those rather than
+            # printing prose a reader cannot independently trace.
+            paragraphs=(),
             tables=self._tables(section),
             charts=self._charts(section),
         )
@@ -402,7 +414,8 @@ class Synthesizer:
         for finding in findings:
             text = self._softened_text(finding)
             fingerprint = self._fingerprint_for(finding)
-            ids = frozenset((*finding.evidence_ids, *finding.analytics_ids))
+            evidence_ids = self._evidence_for_finding(finding)
+            ids = frozenset((*evidence_ids, *finding.analytics_ids))
             scope = self._seen_fingerprints if dedupe else local_seen
             if any(
                 is_near_duplicate(fingerprint, seen_text)
@@ -415,12 +428,30 @@ class Synthesizer:
             statements.append(Statement(
                 text=text,
                 claim_type=finding.claim_type,
-                evidence_ids=finding.evidence_ids,
+                evidence_ids=evidence_ids,
                 analytics_ids=finding.analytics_ids,
-                citation_refs=self.citations.refs_for(finding.evidence_ids),
+                citation_refs=self.citations.refs_for(evidence_ids),
                 confidence=finding.confidence,
             ))
         return tuple(statements)
+
+    def _evidence_for_finding(self, finding: KeyFinding) -> tuple[str, ...]:
+        """Expand derived analytics to their input evidence.
+
+        A calculation is reproducible only if the report also identifies the
+        underlying observations.  This makes an analytics-only finding render
+        a normal source link instead of an unexplained, uncited bullet.
+        """
+        evidence_ids = list(finding.evidence_ids)
+        analytics_by_id = {
+            item.analytics_id: item
+            for item in getattr(getattr(self, "analytics", None), "results", ())
+        }
+        for analytics_id in finding.analytics_ids:
+            result = analytics_by_id.get(analytics_id)
+            if result is not None:
+                evidence_ids.extend(result.input_evidence_ids)
+        return tuple(dict.fromkeys(evidence_ids))
 
     def _tables(self, section: ReportSection) -> tuple[MetricTable, ...]:
         """This section's tables, from the single central set of exhibits.
@@ -471,10 +502,15 @@ class Synthesizer:
                 selected.append(candidates[0])
 
         statements = self._statements(tuple(selected), dedupe=False)
+        summary_evidence_ids = tuple(dict.fromkeys(
+            evidence_id for statement in statements for evidence_id in statement.evidence_ids
+        ))
         return ReportSectionDraft(
             section=ReportSection.KEY_TAKEAWAYS,
             title="Key Takeaways",
             summary=self._takeaway_summary(by_segment),
+            summary_evidence_ids=summary_evidence_ids,
+            summary_citation_refs=self.citations.refs_for(summary_evidence_ids),
             statements=statements,
         )
 

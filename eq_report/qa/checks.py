@@ -74,6 +74,14 @@ def check_references_exist(context: QAContext) -> list[QAFinding]:
     valid_analytics = {r.analytics_id for r in context.analytics.results}
 
     for section in context.draft.sections:
+        for evidence_id in section.summary_evidence_ids:
+            if context.reader.get(evidence_id) is None:
+                findings.append(QAFinding(
+                    check="evidence.reference_exists", severity=Severity.CRITICAL,
+                    message=f"Section summary cites evidence id {evidence_id}, which is not in the Evidence Store.",
+                    section=section.section.value, subject=section.summary[:160],
+                    details={"evidence_id": evidence_id},
+                ))
         for statement in section.statements:
             for evidence_id in statement.evidence_ids:
                 if context.reader.get(evidence_id) is None:
@@ -116,6 +124,14 @@ def check_claims_are_supported(context: QAContext) -> list[QAFinding]:
     """
     findings: list[QAFinding] = []
     for section in context.draft.sections:
+        if section.summary and section.section is not ReportSection.SOURCES and not (
+            section.summary_evidence_ids or section.summary_analytics_ids
+        ):
+            findings.append(QAFinding(
+                check="evidence.summary_supported", severity=Severity.CRITICAL,
+                message="Section summary has no supporting evidence or analytics reference.",
+                section=section.section.value, subject=section.summary[:200],
+            ))
         for statement in section.statements:
             supported = bool(statement.evidence_ids or statement.analytics_ids)
             has_number = has_asserted_numeric_fact(statement.text)
@@ -149,6 +165,53 @@ def check_claims_are_supported(context: QAContext) -> list[QAFinding]:
                     section=section.section.value,
                     subject=statement.text[:200],
                 ))
+    return findings
+
+
+def check_cited_sources_are_traceable(context: QAContext) -> list[QAFinding]:
+    """Block publication when a cited claim has no retraceable source.
+
+    A provider name alone is not a source.  Every cited observation must
+    retain either the original publisher URL, the provider record URL, or a
+    source URL.  Rejected web evidence is handled by the separate re-verifier.
+    """
+    findings: list[QAFinding] = []
+    for section in context.draft.sections:
+        if section.summary and section.section is not ReportSection.SOURCES and not section.summary_evidence_ids:
+            findings.append(QAFinding(
+                check="evidence.summary_traceable", severity=Severity.CRITICAL,
+                message="Section summary has no source evidence ID to render as a citation.",
+                section=section.section.value, subject=section.summary[:200],
+            ))
+        evidence_ids = list(section.summary_evidence_ids)
+        for statement in section.statements:
+            if not statement.evidence_ids:
+                findings.append(QAFinding(
+                    check="evidence.claim_traceable", severity=Severity.CRITICAL,
+                    message="Statement has no source evidence ID to render as a citation.",
+                    section=section.section.value, subject=statement.text[:200],
+                ))
+            evidence_ids.extend(statement.evidence_ids)
+        for evidence_id in dict.fromkeys(evidence_ids):
+            item = context.reader.get(evidence_id)
+            if item is None:
+                continue
+            if item.original_source_url or item.source_url or item.retrieval_url:
+                if item.status is EvidenceStatus.VALIDATED:
+                    continue
+                findings.append(QAFinding(
+                    check="evidence.source_validated", severity=Severity.CRITICAL,
+                    message="Cited evidence was not validated, so it is not publishable as a reputable source.",
+                    section=section.section.value,
+                    details={"evidence_id": evidence_id, "source": item.source_name,
+                             "status": item.status.value},
+                ))
+                continue
+            findings.append(QAFinding(
+                check="evidence.source_traceable", severity=Severity.CRITICAL,
+                message="Cited evidence has no publisher or provider URL, so the claim cannot be traced.",
+                section=section.section.value, details={"evidence_id": evidence_id, "source": item.source_name},
+            ))
     return findings
 
 
@@ -252,6 +315,14 @@ def check_citation_numbering(context: QAContext) -> list[QAFinding]:
     findings: list[QAFinding] = []
     known = {citation.ref_number for citation in context.draft.citations}
     for section in context.draft.sections:
+        for ref in section.summary_citation_refs:
+            if ref not in known:
+                findings.append(QAFinding(
+                    check="evidence.citation_resolves", severity=Severity.CRITICAL,
+                    message=f"Summary reference [{ref}] does not appear in the source list.",
+                    section=section.section.value, subject=section.summary[:160],
+                    details={"ref": ref},
+                ))
         for statement in section.statements:
             for ref in statement.citation_refs:
                 if ref not in known:
@@ -798,6 +869,7 @@ def _step_key(key: str) -> int:
 ALL_CHECKS = (
     check_references_exist,
     check_claims_are_supported,
+    check_cited_sources_are_traceable,
     check_web_claims_reverified,
     check_numeric_claims_use_canonical_evidence,
     check_accounting_identities,
