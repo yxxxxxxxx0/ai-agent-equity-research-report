@@ -291,7 +291,17 @@ class Synthesizer:
         self, section: ReportSection, title: str, result: SegmentResult
     ) -> ReportSectionDraft:
         findings = self._findings_for_section(section, result)
-        statements = self._statements(findings)
+        # Catalysts deliberately shares its source findings with Risks: the
+        # shared risk/catalyst agent may tag one finding with both labels so
+        # it can serve both sections (see agents/llm_agent.py's system
+        # prompt). Risks builds first and registers its statements in the
+        # cross-section dedup scope, so without this, every double-tagged
+        # finding would be stripped back out of Catalysts as a "repeat of
+        # itself" - defeating the entire point of allowing both tags, and
+        # the actual reason Catalysts kept coming back empty even when the
+        # agent produced real, on-topic findings for it.
+        dedupe = section is not ReportSection.CATALYSTS
+        statements = self._statements(findings, dedupe=dedupe)
 
         return ReportSectionDraft(
             section=section,
