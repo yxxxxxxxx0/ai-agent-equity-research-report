@@ -193,7 +193,9 @@ def _volatility(close: list[float], period: int) -> list[float | None]:
 #: place a reader anywhere in the 90-session window without crowding a panel
 #: this size (the price chart in the main report uses the same tick count
 #: for the same reason - see pdf_renderer.py::_LINE_CHART_TICKS).
-_PANEL_X_TICKS = 5
+# Date labels are intentionally fixed at two trading weeks (10 sessions),
+# rather than spread across an arbitrary number of chart ticks.
+_PANEL_X_TICK_INTERVAL = 10
 
 
 def _draw_x_axis(c: Canvas, x: float, y: float, w: float, dates: list[dt.date]) -> None:
@@ -206,9 +208,10 @@ def _draw_x_axis(c: Canvas, x: float, y: float, w: float, dates: list[dt.date]) 
     if not dates:
         return
     last = max(len(dates) - 1, 1)
-    tick_count = min(_PANEL_X_TICKS, last + 1)
-    steps = sorted({round(last * i / (tick_count - 1)) for i in range(tick_count)}) \
-        if tick_count > 1 else [0]
+    # The points are daily trading sessions, so stepping by 10 produces labels
+    # precisely two trading weeks apart.  Do not force in the final point: it
+    # may be fewer than 10 sessions after the prior label.
+    steps = list(range(0, len(dates), _PANEL_X_TICK_INTERVAL))
     c.setStrokeColor(colors.HexColor("#98a1ad"))
     c.setLineWidth(0.9)
     c.setFillColor(colors.HexColor("#4a5158"))
@@ -237,7 +240,7 @@ def _plot(c: Canvas, x: float, y: float, w: float, h: float, title: str,
     # long titles (notably Bollinger Bands) and up to four series; putting
     # both on the same line made the labels collide in the A4 appendix.
     c.setFont("Helvetica-Bold", 8.5)
-    c.setFillColor(colors.HexColor("#12395e"))
+    c.setFillColor(colors.HexColor("#c04f15"))
     c.drawString(x, y + h + 18, title)
     c.setStrokeColor(colors.HexColor("#98a1ad")); c.setLineWidth(1.0); c.rect(x, y, w, h, stroke=1, fill=0)
     for level in range(1, 4):
@@ -280,7 +283,7 @@ def _plot_candlestick(
     span = (hi - lo) or 1
     lo, hi = lo - span * .08, hi + span * .08
     c.setFont("Helvetica-Bold", 8.5)
-    c.setFillColor(colors.HexColor("#12395e"))
+    c.setFillColor(colors.HexColor("#c04f15"))
     c.drawString(x, y + h + 18, title)
     c.setStrokeColor(colors.HexColor("#98a1ad")); c.setLineWidth(1.0); c.rect(x, y, w, h, stroke=1, fill=0)
     for level in range(1, 4):
@@ -377,7 +380,7 @@ def build_technical_appendix_pdf(
     keep = 90
     c = Canvas(str(output_pdf), pagesize=A4); page_w, page_h = A4
     def header(page: int, subtitle: str):
-        c.setFillColor(colors.HexColor('#12395e')); c.rect(0, page_h-52, page_w, 52, fill=1, stroke=0); c.setFillColor(colors.white); c.setFont('Helvetica-Bold', 15); c.drawString(42, page_h-31, f'Technical Appendix — {ticker}'); c.setFont('Helvetica', 8); c.drawRightString(page_w-42, page_h-31, page_label); c.setFillColor(colors.HexColor('#5c6470')); c.setFont('Helvetica', 7); c.drawString(42, page_h-66, subtitle)
+        c.setFillColor(colors.HexColor('#c04f15')); c.rect(0, page_h-52, page_w, 52, fill=1, stroke=0); c.setFillColor(colors.white); c.setFont('Helvetica-Bold', 15); c.drawString(42, page_h-31, f'Technical Appendix — {ticker}'); c.setFont('Helvetica', 8); c.drawRightString(page_w-42, page_h-31, page_label); c.setFillColor(colors.HexColor('#5c6470')); c.setFont('Helvetica', 7); c.drawString(42, page_h-66, subtitle)
     header(1, f'Last 90 trading days ending {dates[-1].isoformat()} · {source_label}')
     s = lambda values: values[-keep:]
     price_change = (close[-1] / close[-keep] - 1) * 100
@@ -390,22 +393,22 @@ def build_technical_appendix_pdf(
     window_dates = s(dates)
     _plot_candlestick(c, 45, 635, 225, 105, 'Price', window_dates, s(open_), s(high), s(low), s(close))
     _caption(c, 45, 618, 225, f"Close is {price_change:+.1f}% over the 90-session window.")
-    _plot(c, 320, 635, 225, 105, 'Moving averages', [('Close', s(close), colors.HexColor('#12395e')), ('MA 10', s(ma10), colors.HexColor('#d99a2b')), ('MA 20', s(ma20), colors.HexColor('#2f6f5e')), ('MA 50', s(ma50), colors.HexColor('#7a5a9e'))], dates=window_dates)
+    _plot(c, 320, 635, 225, 105, 'Moving averages', [('Close', s(close), colors.HexColor('#c04f15')), ('MA 10', s(ma10), colors.HexColor('#d99a2b')), ('MA 20', s(ma20), colors.HexColor('#2f6f5e')), ('MA 50', s(ma50), colors.HexColor('#7a5a9e'))], dates=window_dates)
     _caption(c, 320, 618, 225, f"Close is {ma20_gap:+.1f}% versus the 20-day average; alignment frames trend direction.")
-    _plot(c, 45, 465, 225, 105, 'Bollinger Bands (10, 2)', [('Close', s(close), colors.HexColor('#12395e')), ('MA 10', s(ma10), colors.HexColor('#d99a2b')), ('Upper', s(upper), colors.HexColor('#8993a1')), ('Lower', s(lower), colors.HexColor('#8993a1'))], dates=window_dates)
+    _plot(c, 45, 465, 225, 105, 'Bollinger Bands (10, 2)', [('Close', s(close), colors.HexColor('#c04f15')), ('MA 10', s(ma10), colors.HexColor('#d99a2b')), ('Upper', s(upper), colors.HexColor('#8993a1')), ('Lower', s(lower), colors.HexColor('#8993a1'))], dates=window_dates)
     _caption(c, 45, 448, 225, f"Close sits at {band_position:.0%} of the 10-day band range; extremes can flag stretched price action.")
-    _plot(c, 320, 465, 225, 105, 'MACD (12, 26, 9)', [('MACD', s(macd), colors.HexColor('#12395e')), ('Signal', s(signal), colors.HexColor('#d99a2b'))], dates=window_dates)
+    _plot(c, 320, 465, 225, 105, 'MACD (12, 26, 9)', [('MACD', s(macd), colors.HexColor('#c04f15')), ('Signal', s(signal), colors.HexColor('#d99a2b'))], dates=window_dates)
     _caption(c, 320, 448, 225, f"MACD is {macd_state} its signal line, a short-term momentum read rather than a valuation signal.")
     _plot(c, 45, 295, 225, 105, 'On-balance volume (OBV)', [('OBV', s(obv), colors.HexColor('#2f6f5e'))], dates=window_dates)
     _caption(c, 45, 278, 225, f"OBV moved {obv_change_m:+.0f}m shares over 20 sessions; direction tests volume confirmation.")
-    _plot(c, 320, 295, 225, 105, 'RSI (10-day)', [('RSI', s(rsi), colors.HexColor('#12395e'))], fixed=(0, 100), dates=window_dates)
+    _plot(c, 320, 295, 225, 105, 'RSI (10-day)', [('RSI', s(rsi), colors.HexColor('#c04f15'))], fixed=(0, 100), dates=window_dates)
     _caption(c, 320, 278, 225, f"RSI is {rsi[-1]:.1f} ({rsi_state}); 70/30 are conventional overbought/oversold reference levels.")
-    _plot(c, 45, 100, 500, 110, 'Annualised realised volatility', [('10d', s(vol10), colors.HexColor('#12395e')), ('20d', s(vol20), colors.HexColor('#d99a2b')), ('30d', s(vol30), colors.HexColor('#2f6f5e'))], dates=window_dates)
+    _plot(c, 45, 100, 500, 110, 'Annualised realised volatility', [('10d', s(vol10), colors.HexColor('#c04f15')), ('20d', s(vol20), colors.HexColor('#d99a2b')), ('30d', s(vol30), colors.HexColor('#2f6f5e'))], dates=window_dates)
     _caption(c, 45, 83, 500, f"Annualised realised volatility: {vol10[-1]:.1f}% (10d), {vol20[-1]:.1f}% (20d), and {vol30[-1]:.1f}% (30d); a near-term risk gauge.")
     # The chart is a timing/risk supplement, so it carries a compact,
     # calculation-backed interpretation rather than asking the reader to
     # infer every signal. It deliberately does not make an investment call.
-    c.setFillColor(colors.HexColor('#12395e')); c.setFont('Helvetica-Bold', 6.8)
+    c.setFillColor(colors.HexColor('#c04f15')); c.setFont('Helvetica-Bold', 6.8)
     c.drawString(45, 59, 'Technical read-through')
     c.setFillColor(colors.HexColor('#1a1a1a')); c.setFont('Helvetica', 6.5)
     c.drawString(45, 47, (

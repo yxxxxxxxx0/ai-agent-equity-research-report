@@ -15,7 +15,7 @@ here rather than editing the pipeline itself, so this file is the only place
 that knows a web UI exists at all.
 
 The visual language is deliberately the report's own, not a generic
-dashboard theme: the same navy/ink/rust/teal palette and hairline-and-zebra
+dashboard theme: the same orange/ink/rust/teal palette and hairline-and-zebra
 table style as eq_report/rendering/pdf_renderer.py, so this page reads as
 the desk behind the printed note rather than an unrelated admin panel.
 """
@@ -366,7 +366,7 @@ APP_STYLE = """
     :root {
       --page-bg: #eef1f6; --card-bg: #ffffff; --border: #e4e8f0;
       --ink: #12172b; --ink-soft: #3d4459; --muted: #6b7280; --faint: #9aa2b1;
-      --navy: #0f1b33; --blue: #2f5fff; --blue-soft: #eaf0ff; --blue-ring: #c7d7ff;
+      --navy: #8f350b; --blue: #c04f15; --blue-soft: #f8e3d9; --blue-ring: #efc5b0;
       --step-line: #e4e8f0;
       --font-ui: -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
       --font-mono: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;

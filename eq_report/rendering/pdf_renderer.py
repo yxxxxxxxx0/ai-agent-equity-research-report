@@ -84,9 +84,14 @@ PAPER = colors.HexColor("#ffffff")
 BAND = colors.HexColor("#eef1f5")
 ZEBRA = colors.HexColor("#f5f7fa")
 
-ACCENT = colors.HexColor("#12395e")          # deep navy - identity colour
-ACCENT_SOFT = colors.HexColor("#e4ebf2")     # tint of ACCENT for chips/callouts
-ACCENT_LINE = colors.HexColor("#9db6cc")
+# Identity colours sampled from the supplied NVDA page-one reference.  Keep
+# the exact solid orange for structural bands and its pale peach tint for
+# chips/callouts so the whole template reads as one coherent system.
+ACCENT_HEX = "#c04f15"
+ACCENT = colors.HexColor(ACCENT_HEX)
+ACCENT_SOFT = colors.HexColor("#f8e3d9")
+ACCENT_LINE = colors.HexColor("#d58c66")
+ACCENT_DARK = colors.HexColor("#8f350b")
 
 WARN_BG = colors.HexColor("#fdf3e0")
 WARN_BORDER = colors.HexColor("#d99a2b")
@@ -131,7 +136,10 @@ DATA_COL_W = 26 * mm
 #: start on the current page: the heading band itself plus roughly two lines
 #: of body. A section that would start with less than this left on the page
 #: opens a fresh page instead of stranding a heading with nothing under it.
-SECTION_MIN_HEIGHT = 70
+# Enough room for a section heading, summary and its first content line.  This
+# prevents a heading from being stranded at the bottom of one page with the
+# section itself continuing only on the next.
+SECTION_MIN_HEIGHT = 120
 
 #: Short label printed against a statement so the reader can tell a reported
 #: figure from an inference without following the citation.
@@ -382,7 +390,9 @@ class PdfReportRenderer:
     def _key_data_strip(self, panel: KeyDataPanel, styles) -> Table:
         """Compact two-up grid used above the opening narrative."""
         cards = []
-        card_width = CONTENT_W / 2
+        # A single group should read as a deliberate, full-width strip rather
+        # than as the left half of an unfinished two-column grid.
+        card_width = CONTENT_W if len(panel.groups) == 1 else CONTENT_W / 2
         for group in panel.groups:
             rows = [[Paragraph(_escape(group.title), styles["panel_group"]), ""]]
             rows.extend([
@@ -402,6 +412,9 @@ class PdfReportRenderer:
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ]))
             cards.append(card)
+
+        if len(cards) == 1:
+            return cards[0]
 
         outer_rows = []
         for index in range(0, len(cards), 2):
@@ -454,11 +467,11 @@ class PdfReportRenderer:
             if citation.source_url:
                 href = _escape(citation.source_url)
                 marker = (
-                    f'<a href="{href}" color="#12395e">[{citation.ref_number}]</a>'
+                    f'<a href="{href}" color="{ACCENT_HEX}">[{citation.ref_number}]</a>'
                 )
-                url = f' <a href="{href}" color="#12395e">&lt;{href}&gt;</a>'
+                url = f' <a href="{href}" color="{ACCENT_HEX}">&lt;{href}&gt;</a>'
             else:
-                marker = f"<font color='#12395e'>[{citation.ref_number}]</font>"
+                marker = f"<font color='{ACCENT_HEX}'>[{citation.ref_number}]</font>"
                 url = ""
             story.append(Paragraph(
                 f"{anchor}{marker} "
@@ -595,7 +608,7 @@ class PdfReportRenderer:
             ("RIGHTPADDING", (1, 0), (1, 0), 10),
             ("TOPPADDING", (0, 0), (-1, -1), 10),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
-            ("LINEBELOW", (0, 0), (-1, -1), 2.2, colors.HexColor("#0c2846")),
+            ("LINEBELOW", (0, 0), (-1, -1), 2.2, ACCENT_DARK),
         ]))
         return band
 
@@ -898,7 +911,7 @@ class PdfReportRenderer:
         # Each ref is an internal link to its anchor in the source list
         # (_back_matter), so clicking [n] in the body jumps straight to it.
         refs = "".join(
-            f'<a href="#cite_{r}" color="#12395e">[{r}]</a>'
+            f'<a href="#cite_{r}" color="{ACCENT_HEX}">[{r}]</a>'
             for r in statement.citation_refs
         )
         tag = _CLAIM_TAGS.get(statement.claim_type, statement.claim_type.value)

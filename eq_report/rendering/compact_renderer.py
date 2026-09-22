@@ -262,7 +262,7 @@ def _render_brief(draft: ReportDraft, output_pdf: Path) -> None:
     monitoring = next((s for s in draft.sections if s.section == ReportSection.WHAT_MATTERS_NEXT), None)
     recent = next((s for s in draft.sections if s.title == "Recent Developments"), None)
 
-    # Header: the same accent-navy identity band as the full report's
+    # Header: the same accent-orange identity band as the full report's
     # masthead (see pdf_renderer._masthead_band), condensed to one page.
     c.setFillColor(ACCENT)
     c.setFont("Helvetica-Bold", 16)
