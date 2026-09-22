@@ -27,6 +27,7 @@ from ..llm.usage import UsageTracker
 from ..logging_setup import get_logger, log_event
 from .auditor import QAAuditor
 from .checks import ALL_CHECKS, QAContext
+from .entailment import verify_claim_entailment
 from .web_claim_auditor import reverify_web_claims
 
 logger = get_logger("qa")
@@ -84,6 +85,15 @@ class QAEngine:
         findings, ran = self._run_checks(context)
         checks_run.extend(ran)
 
+        # IDs prove provenance, not semantic support.  This independent pass
+        # checks that each sentence is actually entailed by the particular
+        # sources/calculations mapped to it.
+        entailment_findings = await verify_claim_entailment(
+            draft, reader, analytics, self._model_config, tracker=self._tracker)
+        findings.extend(entailment_findings)
+        if self._model_config is not None and self._model_config.enabled:
+            checks_run.append("claim_entailment")
+
         # A conflict is usually a real data disagreement, but market-data
         # payloads can also place adjusted, peer, option, and benchmark
         # series under similar field labels. The auditor (qa/auditor.py)
@@ -105,6 +115,10 @@ class QAEngine:
             # elsewhere in the report is untouched and still flagged.
             findings, recheck_names = self._run_checks(context)
             checks_run.extend(f"{name}.recheck" for name in recheck_names)
+            findings.extend(await verify_claim_entailment(
+                draft, reader, analytics, self._model_config, tracker=self._tracker))
+            if self._model_config is not None and self._model_config.enabled:
+                checks_run.append("claim_entailment.recheck")
             log_event(logger, logging.INFO, "QA auditor corrected evidence; re-ran all checks",
                       corrected_metrics=sorted(outcome.corrected_metrics))
 
@@ -154,4 +168,3 @@ class QAEngine:
                           check=name, error=str(exc))
             checks_run.append(name)
         return findings, checks_run
-
