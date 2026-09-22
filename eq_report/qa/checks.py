@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 from ..analytics import calculations as calc
 from ..domain.analytics import AnalyticsBundle
-from ..domain.enums import ClaimType, Confidence, ReportSection, Severity
+from ..domain.enums import ClaimType, Confidence, EvidenceStatus, ReportSection, Severity
 from ..domain.plan import ResearchPlan
 from ..domain.qa import QAFinding
 from ..domain.report import ReportDraft
@@ -149,6 +149,39 @@ def check_claims_are_supported(context: QAContext) -> list[QAFinding]:
                     section=section.section.value,
                     subject=statement.text[:200],
                 ))
+    return findings
+
+
+def check_web_claims_reverified(context: QAContext) -> list[QAFinding]:
+    """A web-sourced claim demoted by qa.web_claim_auditor must not publish.
+
+    ``pipeline.web_gap_fill`` already verifies a claim twice before it ever
+    reaches the Evidence Store; ``qa.web_claim_auditor`` re-checks it a
+    third time, immediately before publication, and marks the row REJECTED
+    if that fresh check fails. This check is what turns that store-level
+    demotion into a blocking finding the existing repair/omission path
+    already knows how to handle.
+    """
+    findings: list[QAFinding] = []
+    for section in context.draft.sections:
+        for statement in section.statements:
+            for evidence_id in statement.evidence_ids:
+                item = context.reader.get(evidence_id)
+                if (
+                    item is not None
+                    and item.retrieval_provider == "web_gap_fill"
+                    and item.status is EvidenceStatus.REJECTED
+                ):
+                    findings.append(QAFinding(
+                        check="evidence.web_claim_not_reverified",
+                        severity=Severity.CRITICAL,
+                        message="This statement's web-sourced claim could not be "
+                                "re-confirmed by an independent search before publication.",
+                        section=section.section.value,
+                        subject=statement.text[:200],
+                        details={"evidence_id": evidence_id},
+                    ))
+                    break
     return findings
 
 
@@ -765,6 +798,7 @@ def _step_key(key: str) -> int:
 ALL_CHECKS = (
     check_references_exist,
     check_claims_are_supported,
+    check_web_claims_reverified,
     check_numeric_claims_use_canonical_evidence,
     check_accounting_identities,
     check_citation_numbering,

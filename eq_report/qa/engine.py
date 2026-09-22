@@ -27,6 +27,7 @@ from ..llm.usage import UsageTracker
 from ..logging_setup import get_logger, log_event
 from .auditor import QAAuditor
 from .checks import ALL_CHECKS, QAContext
+from .web_claim_auditor import reverify_web_claims
 
 logger = get_logger("qa")
 
@@ -46,11 +47,18 @@ class QAEngine:
     def __init__(
         self, checks=ALL_CHECKS, model_config: ModelConfig | None = None,
         *, tracker: UsageTracker | None = None, verify_conflicts: bool = False,
+        verify_web_claims: bool = False,
     ) -> None:
         self.checks = tuple(checks)
         self._model_config = model_config
         self._tracker = tracker
         self._verify_conflicts = verify_conflicts
+        # A claim pipeline.web_gap_fill already verified twice before writing
+        # it to the Evidence Store gets one more, independent check here,
+        # immediately before publication (see qa/web_claim_auditor.py) -
+        # opt-in alongside EQR_WEB_FILL_GAPS, since it only has work to do
+        # when that stage produced something to recheck.
+        self._verify_web_claims = verify_web_claims
 
     async def validate(
         self,
@@ -61,7 +69,20 @@ class QAEngine:
     ) -> QAResult:
         context = QAContext(draft=draft, plan=plan, reader=reader, analytics=analytics)
 
-        findings, checks_run = self._run_checks(context)
+        checks_run: list[str] = []
+        if self._verify_web_claims:
+            web_audit = await reverify_web_claims(
+                draft, reader, self._model_config, tracker=self._tracker)
+            checks_run.append("web_claim_auditor")
+            if web_audit.rejected:
+                log_event(
+                    logger, logging.WARNING,
+                    "QA web-claim re-verification demoted evidence before publication",
+                    checked=web_audit.checked, rejected=list(web_audit.rejected),
+                )
+
+        findings, ran = self._run_checks(context)
+        checks_run.extend(ran)
 
         # A conflict is usually a real data disagreement, but market-data
         # payloads can also place adjusted, peer, option, and benchmark

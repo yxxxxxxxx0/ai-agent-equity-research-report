@@ -253,7 +253,7 @@ class Synthesizer:
                 continue
             self._omit(
                 section.section,
-                "No validated MegaAPI evidence or deterministic analytic supported this "
+                "No validated evidence or deterministic analytic supported this "
                 "section, so it was omitted rather than fabricated.",
             )
 

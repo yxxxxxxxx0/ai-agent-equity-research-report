@@ -28,6 +28,7 @@ _REPAIRABLE_STATEMENT_CHECKS = frozenset({
     "evidence.no_unsupported_numbers",
     "evidence.claim_supported",
     "evidence.numeric_claim_not_canonical",
+    "evidence.web_claim_not_reverified",
 })
 
 _REWRITEABLE_CHECKS = frozenset({"evidence.numeric_claim_not_canonical"})

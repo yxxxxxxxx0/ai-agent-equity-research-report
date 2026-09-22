@@ -236,9 +236,13 @@ async def fill_evidence_gaps(
     }
     prompt = (
         f"Company: {company} ({ticker or 'ticker unknown'})\n"
-        f"Topics needing a source-backed fact: "
+        f"Topics needing source-backed facts: "
         f"{[{'topic': t, 'need': _TOPICS[t]} for t in topics]}\n"
-        f"Return at most one claim per topic. Return this JSON shape: {schema}"
+        "For each topic, return every distinct, source-backed fact you can find that "
+        "addresses it - up to 3 per topic - so the topic has enough independent material "
+        "to write from; never invent extra claims just to reach that count, and a topic "
+        "with only one real source-backed fact should return only that one. "
+        f"Return this JSON shape: {schema}"
     )
     try:
         response = await client.complete_json(
