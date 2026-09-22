@@ -21,20 +21,16 @@ from ..domain.enums import ReportSection
 from ..domain.report import MetricTable, ReportDraft
 from ..logging_setup import get_logger
 from .json_loader import load_report_json
+from .pdf_renderer import ACCENT, ACCENT_LINE, ACCENT_SOFT, HAIRLINE, INK, MUTED, ZEBRA
 from .technical_appendix import build_technical_appendix_pdf, merge_technical_appendix
 
 logger = get_logger("rendering.compact")
 
-# Match the supplied NVDA teaser: deep ink typography, warm rust section
-# frames, and almost-white content cards rather than a dashboard palette.
-NAVY = colors.HexColor("#102e4a")
-INK = colors.HexColor("#171717")
-MUTED = colors.HexColor("#6a625c")
-RUST = colors.HexColor("#c94f10")
-RULE = RUST
-PALE = colors.HexColor("#f5f5f3")
-WARM_PALE = colors.HexColor("#fae2d5")
-WARN = colors.HexColor("#fdf3e0")
+# The compact brief is a denser layout of the same report, so it draws from
+# the full report's own palette (see pdf_renderer.py) rather than a second,
+# unrelated colour system - the two are meant to look like one house style,
+# not two different products.
+PAPER = colors.white
 
 
 def _lines(text: str, width: float, font: str = "Helvetica", size: float = 7.2) -> list[str]:
@@ -70,7 +66,7 @@ def _bullets(c: Canvas, x: float, y: float, width: float, texts: list[str], *,
     for text in texts:
         if not text:
             continue
-        c.setFillColor(RUST)
+        c.setFillColor(ACCENT)
         # Align the marker to the first line's baseline instead of to the
         # preceding block's leading; this keeps every bullet visually level.
         c.circle(x + 2, y + 1.1, 1.1, fill=1, stroke=0)
@@ -87,19 +83,22 @@ _BAR_H = 14.0
 
 
 def _heading(c: Canvas, x: float, y: float, label: str, *, width: float = 535.0) -> float:
-    """A warm, rounded title bar modelled on the supplied teaser."""
-    c.setFillColor(RUST)
-    c.roundRect(x, y - _BAR_H + 3, width, _BAR_H, 7, fill=1, stroke=0)
+    """A solid accent title bar, the same identity colour as the full
+    report's masthead band (see pdf_renderer._masthead_band) rather than a
+    second, unrelated accent colour."""
+    c.setFillColor(ACCENT)
+    c.roundRect(x, y - _BAR_H + 3, width, _BAR_H, 3, fill=1, stroke=0)
     c.setFillColor(colors.white)
-    c.setFont("Helvetica-Bold", 8.6)
-    c.drawCentredString(x + width / 2, y - 7, label)
+    c.setFont("Helvetica-Bold", 8.2)
+    c.drawString(x + 6, y - 7, label.upper())
     return y - _BAR_H - 5
 
 
 def _card(c: Canvas, x: float, y_top: float, width: float, height: float) -> None:
-    """A light bordered box under a section bar, framing its content."""
-    c.setFillColor(PALE)
-    c.setStrokeColor(RULE)
+    """A light bordered box under a section bar, framing its content -
+    the same zebra tint and hairline rule the full report's tables use."""
+    c.setFillColor(ZEBRA)
+    c.setStrokeColor(ACCENT_LINE)
     c.setLineWidth(0.6)
     c.rect(x, y_top - height, width, height, fill=1, stroke=1)
 
@@ -112,8 +111,12 @@ def _bullet_block_height(
     `_bullets` never exceeds `max_lines` per item (it truncates with an
     ellipsis), so this upper bound is exact enough to size a background card
     that always fully contains the text drawn on top of it afterward.
+    Returns exactly 0 when there is nothing to draw, so a caller can use it
+    directly to decide whether the block exists at all.
     """
     n = sum(1 for t in texts if t)
+    if n == 0:
+        return 0.0
     return n * (max_lines * (size + 1.25) + 2) + extra
 
 
@@ -122,6 +125,17 @@ def _table_block_height(table: MetricTable | None) -> float:
     if table is None or not table.columns:
         return 0.0
     return 10 + 10 + min(len(table.rows), 4) * 10 + 4
+
+
+def _paragraph_block_height(
+    text: str, width: float, *, size: float = 7.15, leading: float = 8.6,
+    max_lines: int = 15,
+) -> float:
+    """Worst-case height a `_paragraph` call can take, for sizing its card."""
+    if not text or not text.strip():
+        return 0.0
+    lines = min(len(_lines(text, width, "Helvetica", size)), max_lines)
+    return lines * leading + 4
 
 
 def _key_data(c: Canvas, draft: ReportDraft, y: float) -> float:
@@ -134,9 +148,9 @@ def _key_data(c: Canvas, draft: ReportDraft, y: float) -> float:
     for index, group in enumerate(groups[:4]):
         x = x_positions[index % 2]
         top = y - (index // 2) * row_height
-        c.setFillColor(PALE)
+        c.setFillColor(ZEBRA)
         c.roundRect(x, top - 49, 258, 49, 3, fill=1, stroke=0)
-        c.setFillColor(NAVY)
+        c.setFillColor(ACCENT)
         c.setFont("Helvetica-Bold", 7.0)
         c.drawString(x + 6, top - 10, group.title)
         for item_index, item in enumerate(group.items[:6]):
@@ -168,7 +182,7 @@ def _table(c: Canvas, x: float, y: float, width: float, table: MetricTable) -> f
     columns = table.columns[:4]
     if not columns:
         return y
-    c.setFillColor(RUST)
+    c.setFillColor(ACCENT)
     c.setFont("Helvetica-Bold", 6.7)
     c.drawString(x, y, table.title)
     y -= 10
@@ -181,7 +195,7 @@ def _table(c: Canvas, x: float, y: float, width: float, table: MetricTable) -> f
     col_starts: list[float] = [x]
     for col_width in col_widths[:-1]:
         col_starts.append(col_starts[-1] + col_width)
-    c.setFillColor(RUST)
+    c.setFillColor(ACCENT)
     c.rect(x, y - 10, width, 10, fill=1, stroke=0)
     c.setFillColor(colors.white)
     c.setFont("Helvetica-Bold", 5.7)
@@ -190,10 +204,13 @@ def _table(c: Canvas, x: float, y: float, width: float, table: MetricTable) -> f
                      _fit_cell(column, col_widths[index] - 4, font="Helvetica-Bold", size=5.7))
     y -= 10
     for row_index, row in enumerate(table.rows[:4]):
-        if row_index % 2 == 0:
-            c.setFillColor(PALE)
+        if row.emphasis:
+            c.setFillColor(ACCENT_SOFT)
             c.rect(x, y - 10, width, 10, fill=1, stroke=0)
-        c.setFillColor(INK)
+        elif row_index % 2 == 0:
+            c.setFillColor(ZEBRA)
+            c.rect(x, y - 10, width, 10, fill=1, stroke=0)
+        c.setFillColor(ACCENT if row.emphasis else INK)
         c.setFont("Helvetica-Bold" if row.emphasis else "Helvetica", 5.8)
         values = (row.label, *row.cells)[:len(columns)]
         for index, value in enumerate(values):
@@ -201,11 +218,26 @@ def _table(c: Canvas, x: float, y: float, width: float, table: MetricTable) -> f
                          _fit_cell(value, col_widths[index] - 4,
                                    font="Helvetica-Bold" if row.emphasis else "Helvetica"))
         y -= 10
+        if row_index < min(len(table.rows), 4) - 1:
+            c.setStrokeColor(HAIRLINE)
+            c.setLineWidth(0.4)
+            c.line(x, y, x + width, y)
     return y - 4
 
 
+#: Vertical gap left between one block and the next.
+_BLOCK_GAP = 10.0
+
+
 def _render_brief(draft: ReportDraft, output_pdf: Path) -> None:
-    """Render page one as the supplied teaser's stacked, rust-framed brief."""
+    """Render page one as a dense brief in the full report's own house style.
+
+    Laid out as a top-down flow of independent blocks rather than a fixed
+    grid: a block with no supporting evidence is skipped entirely - no
+    heading, no empty framed box - and every block after it moves up to
+    fill the gap, exactly like the full report drops a section it cannot
+    write rather than printing a heading over a placeholder.
+    """
     page_w, page_h = A4
     c = Canvas(str(output_pdf), pagesize=A4)
     c.setTitle(f"{draft.ticker} compact equity brief")
@@ -230,8 +262,9 @@ def _render_brief(draft: ReportDraft, output_pdf: Path) -> None:
     monitoring = next((s for s in draft.sections if s.section == ReportSection.WHAT_MATTERS_NEXT), None)
     recent = next((s for s in draft.sections if s.title == "Recent Developments"), None)
 
-    # Header: deliberately light and editorial, as in the reference PDF.
-    c.setFillColor(NAVY)
+    # Header: the same accent-navy identity band as the full report's
+    # masthead (see pdf_renderer._masthead_band), condensed to one page.
+    c.setFillColor(ACCENT)
     c.setFont("Helvetica-Bold", 16)
     c.drawString(left_x, page_h - 28, "Compact Equity Brief")
     c.setFont("Helvetica", 13.5)
@@ -240,12 +273,12 @@ def _render_brief(draft: ReportDraft, output_pdf: Path) -> None:
     c.setFont("Helvetica", 8.2)
     c.setFillColor(MUTED)
     c.drawString(left_x, page_h - 62, "Compact equity brief")
-    c.setFillColor(WARM_PALE)
-    c.roundRect(page_w - 178, page_h - 59, 160, 37, 9, fill=1, stroke=0)
-    c.setFillColor(NAVY)
+    c.setFillColor(ACCENT_SOFT)
+    c.roundRect(page_w - 178, page_h - 59, 160, 37, 4, fill=1, stroke=0)
+    c.setFillColor(ACCENT)
     c.setFont("Helvetica-Bold", 8.5)
     c.drawCentredString(page_w - 98, page_h - 37, f"REPORT DATE: {draft.report_date.isoformat()}")
-    c.setStrokeColor(RUST)
+    c.setStrokeColor(ACCENT_LINE)
     c.setLineWidth(1.3)
     c.line(left_x, page_h - 70, page_w - left_x, page_h - 70)
 
@@ -254,62 +287,113 @@ def _render_brief(draft: ReportDraft, output_pdf: Path) -> None:
         _card(c, x, bar_y + 5, width, height)
         return bar_y - 8
 
-    # Full-width introduction and summary mirror the two opening teaser boxes.
-    intro_texts = [
+    def draw_full(y_top: float, title: str, height: float, draw) -> float:
+        """One full-width block, or nothing at all if it has no content."""
+        if height <= 0:
+            return y_top
+        content_y = panel(left_x, y_top, full_w, height, title)
+        draw(left_x + 5, content_y, full_w - 10)
+        return y_top - _BAR_H - height - _BLOCK_GAP
+
+    def draw_pair(
+        y_top: float, title_l: str, height_l: float, draw_l,
+        title_r: str, height_r: float, draw_r,
+    ) -> float:
+        """Two side-by-side blocks - only paired when both have content; a
+        lone survivor renders full width, and an empty pair is skipped."""
+        if height_l <= 0 and height_r <= 0:
+            return y_top
+        if height_l > 0 and height_r > 0:
+            h = max(height_l, height_r)
+            content_l = panel(left_x, y_top, col_w, h, title_l)
+            draw_l(left_x + 5, content_l, col_w - 10)
+            content_r = panel(right_x, y_top, col_w, h, title_r)
+            draw_r(right_x + 5, content_r, col_w - 10)
+            return y_top - _BAR_H - h - _BLOCK_GAP
+        if height_l > 0:
+            return draw_full(y_top, title_l, height_l, draw_l)
+        return draw_full(y_top, title_r, height_r, draw_r)
+
+    # -- content, and only the content that actually exists ----------------
+    intro_texts = [t for t in [
         company.summary if company else "",
         company.statements[0].text if company and company.statements else "",
-    ]
-    y = panel(left_x, page_h - 80, full_w, 94, "Company Overview")
-    _bullets(c, left_x + 5, y, full_w - 10, intro_texts, max_words=70, size=7.1, max_lines=3)
-
+    ] if t]
     snapshot_texts = [s.text for s in (takeaways.statements[:2] if takeaways else ())]
-    y = panel(left_x, page_h - 194, full_w, 65, "Investment Snapshot")
-    _bullets(c, left_x + 5, y, full_w - 10, snapshot_texts, max_words=66, size=6.65, max_lines=2)
-
-    # Two taller, side-by-side panels make room for data on the left and the
-    # financial narrative on the right, matching the reference's focal row.
     financial_table = financial.tables[0] if financial and financial.tables else None
-    y_left = panel(left_x, page_h - 278, col_w, 166, "Key Financial Metrics")
-    table_bottom = _table(c, left_x + 5, y_left, col_w - 10, financial_table) if financial_table else y_left
     metric_notes = [s.text for s in (drivers.statements[:3] if drivers else ())]
-    _bullets(c, left_x + 5, table_bottom - 5, col_w - 10, metric_notes, max_words=28, size=5.85, max_lines=2)
-    y_right = panel(right_x, page_h - 278, col_w, 166, "Financial Performance & Operating Drivers")
     financial_text = " ".join(filter(None, [
         financial.summary if financial else "",
         financial.statements[0].text if financial and financial.statements else "",
     ]))
-    _paragraph(c, right_x + 5, y_right, col_w - 10, financial_text,
-               size=7.15, leading=8.6, max_lines=15)
-
-    # The second two-up row follows the reference: landscape/risk left, a
-    # checkable forward-monitoring panel right (rather than unsourced sentiment).
-    competitive_texts = [
+    competitive_texts = [t for t in [
         competitive.summary if competitive else "",
         competitive.statements[0].text if competitive and competitive.statements else "",
-    ]
-    risk_texts = [
+    ] if t]
+    risk_texts = [t for t in [
         risks.statements[0].text if risks and risks.statements else "",
         risks.statements[1].text if risks and len(risks.statements) > 1 else "",
-    ]
-    y_left = panel(left_x, page_h - 464, col_w, 152, "Competitive Landscape & Business Risk")
-    _bullets(c, left_x + 5, y_left, col_w - 10, competitive_texts + risk_texts,
-             max_words=32, size=6.5, max_lines=3)
-
-    watch_texts = [s.text for s in ((monitoring.statements[:2] if monitoring else ()))]
+    ] if t]
+    watch_texts = [s.text for s in (monitoring.statements[:2] if monitoring else ())]
     recent_texts = [s.text for s in (recent.statements[:2] if recent else ())]
-    y_right = panel(right_x, page_h - 464, col_w, 152, "What Matters Next & Recent Developments")
-    _bullets(c, right_x + 5, y_right, col_w - 10, watch_texts + recent_texts,
-             max_words=34, size=6.5, max_lines=3)
 
-    # The bottom full-width box follows the reference's news treatment, but
-    # is populated only by report statements already supported by evidence.
-    used = {text for text in intro_texts + snapshot_texts + competitive_texts + risk_texts + watch_texts + recent_texts if text}
+    used = {
+        t for t in intro_texts + snapshot_texts + competitive_texts + risk_texts
+        + watch_texts + recent_texts if t
+    }
     candidates = [
         statement.text for section in draft.sections for statement in section.statements[2:]
         if statement.text not in used
-    ]
-    y = panel(left_x, page_h - 634, full_w, 126, "Additional Evidence")
-    _bullets(c, left_x + 5, y, full_w - 10, candidates[:5], max_words=62, size=6.3, max_lines=2)
+    ][:5]
+
+    # -- layout: each block reports its own height, 0 meaning "skip me" ----
+    y = page_h - 80
+
+    y = draw_full(
+        y, "Company Overview", _bullet_block_height(intro_texts, size=7.1, max_lines=3, extra=14),
+        lambda x, yy, w: _bullets(c, x, yy, w, intro_texts, max_words=70, size=7.1, max_lines=3),
+    )
+    y = draw_full(
+        y, "Investment Snapshot",
+        _bullet_block_height(snapshot_texts, size=6.65, max_lines=2, extra=12),
+        lambda x, yy, w: _bullets(c, x, yy, w, snapshot_texts, max_words=66, size=6.65, max_lines=2),
+    )
+
+    def draw_financial_metrics(x: float, yy: float, w: float) -> None:
+        table_bottom = _table(c, x, yy, w, financial_table) if financial_table else yy
+        if metric_notes:
+            _bullets(c, x, table_bottom - 5, w, metric_notes, max_words=28, size=5.85, max_lines=2)
+
+    def draw_financial_narrative(x: float, yy: float, w: float) -> None:
+        _paragraph(c, x, yy, w, financial_text, size=7.15, leading=8.6, max_lines=15)
+
+    financial_metrics_h = _table_block_height(financial_table) + (
+        _bullet_block_height(metric_notes, size=5.85, max_lines=2, extra=8) if metric_notes else 0.0
+    )
+    financial_narrative_h = _paragraph_block_height(
+        financial_text, col_w - 10, size=7.15, leading=8.6, max_lines=15)
+    y = draw_pair(
+        y, "Key Financial Metrics", financial_metrics_h, draw_financial_metrics,
+        "Financial Performance & Operating Drivers", financial_narrative_h, draw_financial_narrative,
+    )
+
+    competitive_risk_texts = competitive_texts + risk_texts
+    watch_recent_texts = watch_texts + recent_texts
+    y = draw_pair(
+        y,
+        "Competitive Landscape & Business Risk",
+        _bullet_block_height(competitive_risk_texts, size=6.5, max_lines=3, extra=12),
+        lambda x, yy, w: _bullets(c, x, yy, w, competitive_risk_texts, max_words=32, size=6.5, max_lines=3),
+        "What Matters Next & Recent Developments",
+        _bullet_block_height(watch_recent_texts, size=6.5, max_lines=3, extra=12),
+        lambda x, yy, w: _bullets(c, x, yy, w, watch_recent_texts, max_words=34, size=6.5, max_lines=3),
+    )
+
+    y = draw_full(
+        y, "Additional Evidence",
+        _bullet_block_height(candidates, size=6.3, max_lines=2, extra=14),
+        lambda x, yy, w: _bullets(c, x, yy, w, candidates, max_words=62, size=6.3, max_lines=2),
+    )
 
     c.setFillColor(MUTED)
     c.setFont("Helvetica", 5.8)
