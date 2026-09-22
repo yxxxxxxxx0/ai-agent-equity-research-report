@@ -1,9 +1,22 @@
 from eq_report.evidence.reader import EvidenceReader
 from eq_report.evidence.store import EvidenceStore
 from eq_report.llm.client import LLMJSONResponse
-from eq_report.pipeline.web_gap_fill import fill_evidence_gaps
+from eq_report.pipeline.web_gap_fill import _domain_allowed, fill_evidence_gaps
 
 _ALLOWED = ("sec.gov", "prnewswire.com")
+
+
+def test_companys_own_domain_is_allowed_without_being_on_the_list():
+    # A company's own investor-relations/newsroom page is a legitimate
+    # primary source even though no fixed allow-list can name it in advance.
+    assert _domain_allowed("https://www.apple.com/newsroom/x", _ALLOWED, "Apple Inc.")
+    assert _domain_allowed("https://investor.apple.com/x", _ALLOWED, "Apple Inc.")
+
+
+def test_a_similarly_named_third_party_site_is_not_mistaken_for_the_company():
+    # "appleinsider.com" merely contains the word "apple" - it is not
+    # Apple's own domain, and must not be admitted on that basis alone.
+    assert not _domain_allowed("https://appleinsider.com/x", _ALLOWED, "Apple Inc.")
 
 
 def _reader() -> EvidenceReader:

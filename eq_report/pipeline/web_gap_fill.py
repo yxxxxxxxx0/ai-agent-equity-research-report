@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -132,20 +133,59 @@ def _thin_topics(reader: EvidenceReader) -> list[str]:
     return thin
 
 
-def _domain_allowed(url: str, allowed_domains: tuple[str, ...]) -> bool:
+#: Company-name words too generic to safely match a domain against (a
+#: legal-form suffix, or a word short enough to false-positive on an
+#: unrelated site).
+_GENERIC_COMPANY_WORDS = {
+    "the", "inc", "incorporated", "corp", "corporation", "co", "company",
+    "group", "holdings", "holding", "limited", "ltd", "plc", "llc", "sa",
+    "ag", "nv", "se", "class", "common", "stock", "shares",
+}
+
+
+def _is_company_domain(netloc: str, company: str) -> bool:
+    """Best-effort check that a domain is the subject company's own site.
+
+    A company's own investor-relations or newsroom page is at least as
+    reputable a source for its own numbers as a third-party wire, but there
+    is no fixed list of "every company's official domain" to allow-list
+    ahead of time - so this matches the domain's registrable label against a
+    distinctive word from the company's name instead (e.g. "apple.com" and
+    "investor.apple.com" both match "Apple Inc."). The match is exact, not
+    substring, so an unrelated site that merely contains the word (e.g.
+    "appleinsider.com") is not mistaken for the company's own domain. This
+    is a heuristic, not a security boundary: the independent verification
+    pass still has to confirm the claim itself before anything is written.
+    """
+    labels = netloc.split(".")
+    if len(labels) < 2:
+        return False
+    registrable = labels[-2]
+    words = [
+        w.lower() for w in re.findall(r"[A-Za-z]{4,}", company)
+        if w.lower() not in _GENERIC_COMPANY_WORDS
+    ]
+    return registrable in words
+
+
+def _domain_allowed(url: str, allowed_domains: tuple[str, ...], company: str) -> bool:
     try:
         netloc = urlparse(url).netloc.lower()
     except ValueError:
         return False
     netloc = netloc.split(":")[0]
-    return any(netloc == d or netloc.endswith(f".{d}") for d in allowed_domains)
+    if any(netloc == d or netloc.endswith(f".{d}") for d in allowed_domains):
+        return True
+    return _is_company_domain(netloc, company)
 
 
-def _source_type_for(url: str) -> SourceType:
+def _source_type_for(url: str, company: str) -> SourceType:
     netloc = urlparse(url).netloc.lower()
     if "sec.gov" in netloc:
         return SourceType.COMPANY_FILING
     if any(w in netloc for w in ("prnewswire", "businesswire", "globenewswire")):
+        return SourceType.COMPANY_ANNOUNCEMENT
+    if _is_company_domain(netloc, company):
         return SourceType.COMPANY_ANNOUNCEMENT
     return SourceType.NEWS
 
@@ -231,7 +271,7 @@ async def fill_evidence_gaps(
         if not url.startswith(("http://", "https://")):
             rejected.append(f"{topic}: no real URL returned")
             continue
-        if not _domain_allowed(url, allowed_domains):
+        if not _domain_allowed(url, allowed_domains, company):
             rejected.append(f"{topic}: {urlparse(url).netloc} is not an allow-listed domain")
             continue
         candidates.append({
@@ -306,7 +346,7 @@ def _to_evidence_item(
         category=EvidenceCategory.DOCUMENT,
         source_id=f"web:{urlparse(url).netloc}",
         source_name=candidate["source_name"],
-        source_type=_source_type_for(url),
+        source_type=_source_type_for(url, company),
         retrieved_at=dt.datetime.now(dt.timezone.utc),
         claim_text=candidate["claim_text"],
         source_url=url,
