@@ -1,7 +1,11 @@
+import datetime as dt
+
+from eq_report.domain.enums import EvidenceCategory, EvidenceStatus, FactType, SourceType
+from eq_report.domain.evidence import EvidenceItem
 from eq_report.evidence.reader import EvidenceReader
 from eq_report.evidence.store import EvidenceStore
 from eq_report.llm.client import LLMJSONResponse
-from eq_report.pipeline.web_gap_fill import _domain_allowed, fill_evidence_gaps
+from eq_report.pipeline.web_gap_fill import _domain_allowed, _thin_topics, fill_evidence_gaps
 
 _ALLOWED = ("sec.gov", "prnewswire.com")
 
@@ -22,6 +26,27 @@ def test_a_similarly_named_third_party_site_is_not_mistaken_for_the_company():
 def _reader() -> EvidenceReader:
     store = EvidenceStore(":memory:")
     return EvidenceReader(store=store, report_run_id="run", ticker="EX", company="Example Corp")
+
+
+def test_company_snapshot_stays_thin_despite_unrelated_documents_existing():
+    # Regression: a run can hold dozens of general news items with nothing
+    # about the company's own profile - "any document exists" is not a
+    # signal that company_snapshot has what it needs.
+    store = EvidenceStore(":memory:")
+    store.save([
+        EvidenceItem(
+            evidence_id=f"news{i}", report_run_id="run", company="Example Corp", ticker="EX",
+            category=EvidenceCategory.DOCUMENT, source_id="src", source_name="Wire",
+            source_type=SourceType.NEWS, retrieved_at=dt.datetime.now(dt.timezone.utc),
+            claim_text=f"unrelated industry news {i}",
+            published_at=dt.date(2026, 9, 1), fact_type=FactType.REPORTED_FACT,
+            status=EvidenceStatus.VALIDATED,
+        )
+        for i in range(20)
+    ])
+    reader = EvidenceReader(store=store, report_run_id="run", ticker="EX", company="Example Corp")
+    assert "company_snapshot" in _thin_topics(reader)
+    assert "catalysts" in _thin_topics(reader)
 
 
 class _FakeClient:

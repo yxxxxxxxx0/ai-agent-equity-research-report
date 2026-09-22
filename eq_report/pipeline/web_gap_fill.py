@@ -134,18 +134,24 @@ def _thin_topics(reader: EvidenceReader) -> list[str]:
 
     Deliberately conservative: a topic is only "thin" when the specific
     evidence that segment needs is genuinely absent, so a well-served report
-    never pays for a search it does not need.
+    never pays for a search it does not need. "Any document exists at all"
+    is not that signal - a run can hold dozens of general news items with
+    nothing specific to a given topic, so each check below tests for the
+    concrete anchor that topic's segment actually needs instead.
     """
     thin: list[str] = []
     latest = reader.latest_reported_period()
-    if not reader.documents(limit=1):
+    if reader.numeric("market_cap") is None and reader.numeric("share_price") is None:
         thin.append("company_snapshot")
     if not latest or reader.numeric("revenue", latest) is None:
         thin.append("financials")
     if not latest or (not reader.segment_rows(latest) and not reader.kpi_rows(latest)):
         thin.append("operating_drivers")
-    if len(reader.documents(limit=3)) < 3:
-        thin.append("catalysts")
+    # No reliable evidence-side signal distinguishes "no upcoming events
+    # exist" from "MegaAPI just didn't surface any" - so catalysts is always
+    # a candidate; the search-then-verify gates below are what keep this
+    # from fabricating one where none is real.
+    thin.append("catalysts")
     return thin
 
 
