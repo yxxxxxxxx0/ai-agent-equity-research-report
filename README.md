@@ -4,9 +4,11 @@ A local, end-to-end prototype that turns a research request into a draft equity
 research PDF. The core stack is **Python, standard-library dataclasses for the
 typed models, SQLite for the Evidence Store, `reportlab` for the PDF**.
 
-All acquisition branches use MegadataAPI. There is no mock, public-web or
-generic vendor fallback: if MegadataAPI is missing or unavailable, the run
-records the acquisition failure instead of substituting synthetic data.
+All normal acquisition branches use MegadataAPI. There is no mock or synthetic
+data fallback: if MegadataAPI is missing or unavailable, the run records the
+acquisition failure. An optional, separately disclosed web gap-fill stage may
+search reputable public sources for thin narrative sections; every accepted
+web claim retains its exact URL and is reverified before publication.
 
 ```bash
 pip install -r requirements.txt
@@ -23,11 +25,31 @@ python -m eq_report --ticker NVDA --report-date 2026-09-02
 Planning, the eight segment agents and Key Takeaways synthesis each have an
 **optional GPT-backed implementation, called through OpenRouter**, that
 replaces their deterministic counterpart when explicitly turned on via
-`.env`/environment variables (see §5a). Every other stage — acquisition,
-normalisation, the Evidence Store, the Analytics Engine, QA and rendering — is
-always deterministic code with no model call, whichever mode is active. With
-none of the model variables set, the pipeline behaves exactly as before: fully
-deterministic, zero API cost.
+`.env`/environment variables (see section 5a). Acquisition, normalisation, the
+Evidence Store, the Analytics Engine and rendering are deterministic code.
+When a model is configured, QA adds an independent semantic claim-to-source
+review to its deterministic checks. With no model variables set, the pipeline
+is fully deterministic and has zero model API cost.
+
+### Current publication guarantees
+
+- Every factual sentence maps internally to specific `evidence_id` rows and/or
+  a deterministic calculation whose inputs map to evidence.
+- Merely attaching a related citation is insufficient. Semantic QA compares
+  each claim with its mapped source material and blocks publication when the
+  source does not support the entity, period, number, direction, comparison,
+  causality or conclusion.
+- Cited evidence must be validated and retain a publisher URL, source URL or
+  provider retrieval URL. A provider name by itself is not traceability.
+- Unsupported free-form narrative is not published. Missing information is
+  disclosed as a gap or omitted with a recorded reason.
+- Primary filings and company releases are preferred. Web-derived claims keep
+  their original URL and are reverified; syndicated analysis or opinion is not
+  silently treated as equivalent to a primary source.
+
+The first accepted layout baseline is tagged `first-acceptable-baseline`
+(`5d16a7f`). Source-traceability enforcement starts at `39610a1`, and semantic
+claim-to-source verification at `03fea33`.
 
 ---
 
@@ -98,7 +120,9 @@ do it. `tests/test_pipeline_e2e.py::test_agents_read_only_from_the_evidence_stor
 hands the agents an empty store and asserts they produce data gaps rather than
 content.
 
-**Provenance chain.** Every printed sentence carries its own lineage:
+**Claim-to-source map.** Every printed factual sentence has its own lineage.
+This is an internal support map, not a requirement that source prose be copied
+into the report:
 
 ```
 Statement.text
@@ -108,8 +132,11 @@ Statement.text
   └── analytics_ids       →  AnalyticsResult.formula + inputs + input_evidence_ids  →  EvidenceItem
 ```
 
-`test_every_report_claim_traces_back_to_a_source` walks that chain for every
-statement in a generated report.
+Deterministic checks walk that chain for every statement and section summary.
+When a model is configured, `qa/entailment.py` performs the separate semantic
+test: it verifies that the mapped material actually supports the complete
+wording. Tests include a negative case where a real SEC citation says `$1B`
+but the report says `$2B`; the claim is correctly blocked.
 
 ---
 
@@ -183,11 +210,15 @@ eq_report/
 │   └── citations.py                 # 8. reference numbering, first-use order
 │
 ├── qa/
-│   ├── checks.py                    # 9. 18 independent checks in five families
-│   └── engine.py                    # 9. runs them all; a broken check is itself critical
+│   ├── checks.py                    # 9. deterministic evidence, numeric and narrative checks
+│   ├── entailment.py                # 9. semantic claim-to-mapped-source verification
+│   ├── web_claim_auditor.py         # 9. pre-publication web-source re-verification
+│   └── engine.py                    # 9. orchestrates QA; critical findings block publication
 │
 ├── rendering/
 │   ├── pdf_renderer.py              # 10. consumes ReportDraft; computes nothing
+│   ├── compact_renderer.py          # 10. sourced compact page + technical dashboard
+│   ├── technical_appendix.py        # 10. live OHLCV technical charts
 │   └── json_writer.py               # 10. report JSON + run manifest
 │
 └── pipeline/
@@ -198,8 +229,8 @@ examples/         nvidia_request.json — a structured request
 output/runs/<id>/ per-run artefacts (see §4)
 ```
 
-79 Python files, ~12,100 lines in `eq_report/` (there is currently no `tests/`
-directory in this checkout).
+The repository includes a maintained `tests/` suite covering normalisation,
+analytics, evidence provenance, synthesis, QA, web verification and rendering.
 
 ---
 
@@ -326,8 +357,8 @@ A branch that dies does not stop the run — the loss surfaces as data gaps.
 | 6. Analytics | evidence → `AnalyticsResult` (value, unit, formula, inputs, `input_evidence_ids`) | `04_analytics.json` |
 | 7. Agents | plan + reader + analytics → 8 × `SegmentResult` **concurrently** | `05_segments.json` |
 | 8. Synthesis | segment results → `ReportDraft` (sections, statements, tables, charts, citations, gaps) | `06_report_draft.json` |
-| 9. QA | `ReportDraft` → `QAResult` (18 checks, five families) | `07_qa.json` |
-| 10. Render | `ReportDraft` → PDF + report JSON | `<TICKER>_<date>_<run>.pdf`, `report_<run>.json` |
+| 9. QA | `ReportDraft` → deterministic checks + semantic claim/source review → `QAResult` | `07_qa.json` |
+| 10. Render | `ReportDraft` → full PDF, compact PDF, optional technical appendix and report JSON | `<TICKER>_<date>_<run>.pdf`, `..._compact_two_page.pdf`, `..._with_technical_appendix.pdf`, `report_<run>.json` |
 | 12. Tracking | everything above → `ReportRun` | `run_<run>.json` |
 
 Every intermediate object is dumped, so any stage can be inspected without
@@ -342,6 +373,9 @@ break it → what matters next.
 **QA check families** (severity policy: `CRITICAL` blocks the PDF):
 
 - *Evidence* — referenced ids exist; no unsupported numbers; reference numbers resolve; weak-evidence-only claims flagged.
+- *Semantic support* — mapped evidence must support the complete wording, not
+  merely concern the same company or topic; an unsupported or unreviewed claim
+  is critical.
 - *Numerical* — every analytic independently recomputed; units known and semantically right; decimal-fraction-as-percentage detection.
 - *Temporal* — periods comparable; no observation dated after the report; the analysed period is named in prose.
 - *Consistency* — one name per ticker, one ticker per company, one currency; no contradictory values for the same metric and period (>1% spread is critical, rounding is a warning).
@@ -420,18 +454,36 @@ log stream for cost tracking.
 MegadataAPI is the sole acquisition provider for market data, fundamentals and
 documents. It is enabled by `EQR_MEGADATA_BASE_URL` and its Basic or Bearer
 credentials. Missing configuration, network failure or an empty response is
-recorded as an acquisition error; no synthetic or public-web fallback runs.
+recorded as an acquisition error; no synthetic data fallback runs. Optional
+web gap-fill is a separate, disclosed research stage and does not impersonate
+missing API data.
+
+### 5c. Full, compact and technical reports
+
+The full and compact reports share one `ReportDraft`:
+
+- The full PDF renders all surviving sourced sections, exhibits and the source
+  list.
+- Compact page 1 selects, shortens and rearranges existing full-report
+  summaries, statements and tables. It does not generate new company analysis,
+  and source markers are preserved when text is shortened.
+- Compact page 2 is the technical dashboard. It is generated separately from
+  live MegaAPI/Bloomberg OHLCV data, so it is not copied from the full report.
+- The full report with technical appendix combines the full narrative PDF with
+  that same independently generated dashboard.
+
+Section titles, layout labels and page footers are template text rather than
+company claims. Every factual compact-report bullet must map back to the same
+source-supported statement used by the full report.
 
 ## 6. Tests
 
-This checkout does not currently include a `tests/` directory. Prior test
-coverage exercised normalisation, analytics, the evidence store, QA, and an
-end-to-end pipeline walk (plan → acquisition → evidence → analytics → agents
-→ draft → QA → PDF, including provenance, concurrency timing, graceful
-degradation under a failing provider, and QA-gated PDF suppression). Rebuild
-that coverage before relying on this code for anything beyond local runs.
+The checkout includes automated tests for normalisation, analytics, the
+evidence store, synthesis, QA repair, web-claim verification, claim-to-source
+entailment, compact rendering and pipeline behavior. Run them with:
 
 ```bash
+pytest -q
 python -m ruff check --select F,E,W,I --line-length 100 eq_report
 ```
 
@@ -482,8 +534,9 @@ adapting rather than printing empty headings: every section that the evidence
 could not fill is dropped, and the report becomes a one-page statement of what
 is missing and why, listed under "Sections not included".
 
-Verbatim from the generated PDF (all figures synthetic — see §9). Reference
-numbers are assigned in order of first use, so they shift if the request changes:
+Legacy illustrative excerpt retained to show the report structure; it is not a
+current live-data output. Reference numbers are assigned in order of first use,
+so they shift if the request changes:
 
 > **2. Company Snapshot** — NVIDIA trades at $187.42 for a $4.56tn market capitalisation, +19.2% year to date
 >
@@ -597,25 +650,26 @@ In the order I would tackle them.
 
 1. **Megadata completeness** — expand endpoint coverage for every required
    fundamental, market and document field while retaining raw payload paths.
-2. **Consensus** — ensure licensed consensus coverage is complete. Until it exists, every
-   surprise and guidance-versus-consensus number is synthetic; the engine
-   already degrades to a documented gap without it.
+2. **Consensus** — expand licensed consensus coverage beyond the currently
+   available MegaAPI/Alpha Vantage and Bloomberg fields. When consensus is
+   unavailable, the engine degrades to a documented gap rather than fabricating
+   a comparison.
 5. **Ticker and entity resolution** — replace the lookup dict with a security
    master, and add fiscal-calendar metadata per issuer. The prototype's fiscal
    convention is internally consistent but assumed, not looked up.
 6. ~~**LLM-backed narrative agents**~~ — done: `LLMSegmentAgent` and
    `LLMSynthesizer`, gated by `EQR_MODEL_USE_FOR_AGENTS`/`_SYNTHESIS`, constrained
-   to evidence/analytics ids they were actually shown. Still open: automated
-   regression coverage now that `tests/` has been removed from this checkout
-   (see §6), and a token-cost/latency budget per run now that real OpenRouter
-   calls are in the critical path.
+   to evidence/analytics ids they were actually shown. Still open: a
+   token-cost/latency budget per run now that real OpenRouter calls are in the
+   critical path.
 7. **Document retrieval** — swap keyword matching for embeddings once the corpus
    is real. Contained entirely within `EvidenceReader`.
-8. **QA hardening** — a units/dimensional-analysis pass over composed metrics,
-   cross-source reconciliation rules, and a claim-to-source entailment check for
-   quoted passages.
-9. **Report design** — the layout is deliberately plain per the brief. A real
-   version needs a house template, a proper chart library, and an exhibit system.
+8. **QA hardening** — semantic claim-to-source entailment is implemented;
+   remaining work includes deeper units/dimensional analysis and broader
+   cross-source reconciliation rules.
+9. **Report design** — the accepted orange house template, compact brief and
+   technical dashboard are implemented; remaining work is broader exhibit and
+   accessibility refinement.
 10. **Evidence Store scale-up** — SQLite is right for one local run. Multiple
     concurrent runs, evidence reuse across runs and retention policy need
     Postgres and a migration path; `EvidenceQuery` is the seam.
