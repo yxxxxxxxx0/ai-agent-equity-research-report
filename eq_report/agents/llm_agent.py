@@ -42,6 +42,7 @@ from ..llm.client import LLMJSONResponse, OpenRouterJSONClient
 from ..llm.usage import UsageTracker
 from ..logging_setup import get_logger, log_event
 from ..normalisation.canonical_metrics import display_label
+from ..pipeline.web_gap_fill import TOPIC_SEGMENTS
 from .base import AgentContext, SegmentAgent
 
 logger = get_logger("agents.llm_agent")
@@ -292,6 +293,14 @@ class LLMSegmentAgent(SegmentAgent):
         questions = [q.text for q in context.plan.questions_for(self.segment)]
         for item in reader.documents_matching(questions, limit=10):
             add(item)
+
+        # A handful of facts pipeline.web_gap_fill deliberately sourced for
+        # this exact segment must reach it regardless of the shared pool's
+        # recency cutoff above (see EvidenceReader.gap_fill_documents).
+        for topic, segment in TOPIC_SEGMENTS.items():
+            if segment is self.segment:
+                for item in reader.gap_fill_documents(topic):
+                    add(item)
 
         return rows, by_id
 

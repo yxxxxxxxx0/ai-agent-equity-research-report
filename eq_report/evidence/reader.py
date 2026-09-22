@@ -186,6 +186,23 @@ class EvidenceReader:
         ))
         return items
 
+    def gap_fill_documents(self, topic: str) -> tuple[EvidenceItem, ...]:
+        """Web-gap-fill evidence tagged for one topic (see pipeline.web_gap_fill).
+
+        A handful of deliberately-fetched, highly targeted facts must not be
+        crowded out of a segment agent's evidence pool by a much larger set
+        of more-recent-but-generic document evidence: ``documents()``'s
+        shared pool is capped and ordered purely by recency, so a fact
+        specifically sourced to fill this topic's gap can otherwise fall
+        below that cutoff and never reach the one segment it was fetched
+        for. This bypasses that cutoff entirely for exactly those items.
+        """
+        return tuple(
+            item for item in self.documents()
+            if item.retrieval_provider == "web_gap_fill"
+            and item.metadata.get("gap_fill_topic") == topic
+        )
+
     def documents_matching(
         self,
         keywords: Sequence[str],

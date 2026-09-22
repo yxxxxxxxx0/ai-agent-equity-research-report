@@ -37,7 +37,14 @@ from typing import Any
 from urllib.parse import urlparse
 
 from ..config import ModelConfig
-from ..domain.enums import Confidence, EvidenceCategory, EvidenceStatus, FactType, SourceType
+from ..domain.enums import (
+    Confidence,
+    EvidenceCategory,
+    EvidenceStatus,
+    FactType,
+    SegmentName,
+    SourceType,
+)
 from ..domain.evidence import EvidenceItem, make_evidence_id
 from ..evidence.reader import EvidenceReader
 from ..llm.client import OpenRouterJSONClient
@@ -66,8 +73,7 @@ only, matching the requested schema."""
 #: Bounds the cost of one run regardless of how many topics are thin.
 _MAX_TOPICS = 4
 
-#: A topic's need, in the search agent's own words - not a segment name, since
-#: the resulting evidence is generic document evidence any segment may cite.
+#: A topic's need, in the search agent's own words.
 _TOPICS: dict[str, str] = {
     "company_snapshot": (
         "A brief factual overview: what the company does, its main business "
@@ -87,6 +93,16 @@ _TOPICS: dict[str, str] = {
         "decision, earnings date, or other near-term development the "
         "company or credible press has disclosed."
     ),
+}
+
+#: Which segment agent each topic's evidence belongs to (see
+#: EvidenceReader.gap_fill_documents and agents/llm_agent.py's use of it) -
+#: the same ReportSection -> SegmentName mapping synthesis.synthesizer uses.
+TOPIC_SEGMENTS: dict[str, SegmentName] = {
+    "company_snapshot": SegmentName.COMPANY_SNAPSHOT,
+    "financials": SegmentName.FINANCIAL_PERFORMANCE,
+    "operating_drivers": SegmentName.OPERATING_DRIVERS,
+    "catalysts": SegmentName.RISKS_CATALYSTS,
 }
 
 
