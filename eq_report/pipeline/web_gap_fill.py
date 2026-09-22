@@ -11,18 +11,21 @@ proposing a fact is never itself trusted. Every candidate here goes through
 two independent gates before it becomes an Evidence Store row a segment agent
 can cite:
 
-1. It must resolve to a real URL. A domain on the configured allow-list
-   (regulatory filings, company newswires, major financial press) or
-   recognisable as the subject company's own by name is fast-tracked; there
-   is no way to list every company's real domain in advance, though (a
-   ticker like "AAPL" shares no letters with "apple.com"), so anything else
-   is not rejected here - it is simply not yet trusted.
+1. It must resolve to a real URL.
 2. A second, independent model call must confirm - via its own live search,
    not a re-read of the first call's answer - that the URL is genuine and
-   its content actually supports the claim. For a candidate that skipped the
-   fast track, this call is also where source legitimacy itself gets
-   decided: the verifier is asked to confirm the source is the company's own
-   official site or a reputable outlet, never a blog, forum or content farm.
+   its content actually supports the claim. This gate never skips, for any
+   candidate, regardless of source. The same call also confirms the source
+   itself is legitimate (the company's own official site or a reputable
+   outlet, never a blog, forum or content farm) - except for a domain on
+   the configured allow-list (regulatory filings, company newswires, major
+   financial press), which is operator-approved in advance and so skips
+   only that sub-question, not the claim check. A domain merely
+   recognisable as the company's own by name (there is no way to list every
+   company's real domain in advance - a ticker like "AAPL" shares no
+   letters with "apple.com") is *not* fast-tracked here: the name match is
+   a fuzzy heuristic, so it still gets the full legitimacy question, and a
+   live search - not the heuristic - is what actually decides it.
    A claim that fails either check is dropped, never written.
 
 Accepted claims are written as ordinary ``EvidenceCategory.DOCUMENT`` rows,
@@ -197,15 +200,20 @@ def _is_company_domain(netloc: str, company: str) -> bool:
     return registrable in words
 
 
-def _domain_allowed(url: str, allowed_domains: tuple[str, ...], company: str) -> bool:
+def _on_curated_list(url: str, allowed_domains: tuple[str, ...]) -> bool:
+    """A domain the operator explicitly curated in advance (SEC, major
+    newswires, major financial press) - trustworthy enough that spending a
+    live-search call to reconfirm it is legitimate would add cost without
+    adding real safety. Deliberately narrower than "allowed": the
+    company-name heuristic (see ``_is_company_domain``) is fuzzy by nature
+    and always still goes through independent verification below, rather
+    than being trusted on a name match alone."""
     try:
         netloc = urlparse(url).netloc.lower()
     except ValueError:
         return False
     netloc = netloc.split(":")[0]
-    if any(netloc == d or netloc.endswith(f".{d}") for d in allowed_domains):
-        return True
-    return _is_company_domain(netloc, company)
+    return any(netloc == d or netloc.endswith(f".{d}") for d in allowed_domains)
 
 
 def _source_type_for(url: str, company: str) -> SourceType:
@@ -307,14 +315,12 @@ async def fill_evidence_gaps(
         candidates.append({
             "topic": topic, "claim_text": claim_text, "source_name": source_name,
             "source_url": url, "published_date": row.get("published_date"),
-            # A domain on the curated list, or recognisable as the subject
-            # company's own site by name, needs no further scrutiny; anything
-            # else still gets a chance, but the independent verifier below is
-            # asked to confirm it is a legitimate source in its own right -
-            # a static list or a name-matching heuristic can't know every
-            # company's real domain (a ticker like "AAPL" shares no letters
-            # with "apple.com"), but a live search knows what apple.com is.
-            "domain_prevalidated": _domain_allowed(url, allowed_domains, company),
+            # A curated, operator-approved domain skips the live-search
+            # verification call below entirely (see _on_curated_list).
+            # Everything else - including a company-name match, which is a
+            # fuzzy heuristic and not a security boundary - still goes
+            # through it, legitimacy question included.
+            "curated": _on_curated_list(url, allowed_domains),
         })
 
     verified = await _verify_candidates(client, company, ticker, candidates)
@@ -339,12 +345,20 @@ async def _verify_candidates(
     client: Any, company: str, ticker: str | None,
     candidates: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """The second, independent check: each candidate is only kept if a fresh
-    web search - not a re-read of the first call's own answer - confirms the
-    URL is real and actually supports the claim. For a candidate whose
-    domain isn't already on the curated allow-list or recognisable as the
-    company's own by name, this call is also where source legitimacy itself
-    gets decided - by a live search, not a static list."""
+    """The second, independent check: every candidate, with no exception, is
+    only kept if a fresh web search - not a re-read of the first call's own
+    answer - confirms the claim itself. That part of the check never skips,
+    for any candidate, regardless of source.
+
+    Source legitimacy is a second question layered onto the same call. A
+    candidate on the curated allow-list (``candidate["curated"]``) skips
+    only that question - the list is operator-approved in advance, so
+    re-litigating "is sec.gov legitimate" on every run adds cost without
+    adding safety. Everything else - including a company-name domain match,
+    which is a fuzzy heuristic and never a security boundary on its own -
+    gets it asked: a static list or a name match can't know every company's
+    real domain, but a live search knows what apple.com is.
+    """
     schema = {
         "verified": "true or false",
         "confirmed_published_date": "YYYY-MM-DD if the page states one, else null",
@@ -363,7 +377,7 @@ async def _verify_candidates(
             f"Company: {company} ({ticker or 'ticker unknown'})\n"
             f"Claim to verify: {candidate['claim_text']}\n"
             f"Claimed source: {candidate['source_name']} <{candidate['source_url']}>\n"
-            f"{'' if candidate.get('domain_prevalidated') else legitimacy_instruction}"
+            f"{'' if candidate.get('curated') else legitimacy_instruction}"
             f"Return this JSON shape: {schema}"
         )
         try:

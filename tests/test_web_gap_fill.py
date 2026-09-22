@@ -5,22 +5,35 @@ from eq_report.domain.evidence import EvidenceItem
 from eq_report.evidence.reader import EvidenceReader
 from eq_report.evidence.store import EvidenceStore
 from eq_report.llm.client import LLMJSONResponse
-from eq_report.pipeline.web_gap_fill import _domain_allowed, _thin_topics, fill_evidence_gaps
+from eq_report.pipeline.web_gap_fill import (
+    _is_company_domain,
+    _on_curated_list,
+    _thin_topics,
+    fill_evidence_gaps,
+)
 
 _ALLOWED = ("sec.gov", "prnewswire.com")
 
 
-def test_companys_own_domain_is_allowed_without_being_on_the_list():
+def test_companys_own_domain_is_recognised_by_name():
     # A company's own investor-relations/newsroom page is a legitimate
-    # primary source even though no fixed allow-list can name it in advance.
-    assert _domain_allowed("https://www.apple.com/newsroom/x", _ALLOWED, "Apple Inc.")
-    assert _domain_allowed("https://investor.apple.com/x", _ALLOWED, "Apple Inc.")
+    # primary source even though no fixed allow-list can name it in
+    # advance - but the name match is a fuzzy heuristic, not curation, so
+    # it must still go through independent legitimacy verification later.
+    assert _is_company_domain("www.apple.com", "Apple Inc.")
+    assert _is_company_domain("investor.apple.com", "Apple Inc.")
+    assert not _on_curated_list("https://www.apple.com/newsroom/x", _ALLOWED)
 
 
 def test_a_similarly_named_third_party_site_is_not_mistaken_for_the_company():
     # "appleinsider.com" merely contains the word "apple" - it is not
     # Apple's own domain, and must not be admitted on that basis alone.
-    assert not _domain_allowed("https://appleinsider.com/x", _ALLOWED, "Apple Inc.")
+    assert not _is_company_domain("appleinsider.com", "Apple Inc.")
+
+
+def test_curated_domains_are_recognised_without_a_company_name_match():
+    assert _on_curated_list("https://www.sec.gov/example-10k", _ALLOWED)
+    assert not _on_curated_list("https://randomblog.example/leak", _ALLOWED)
 
 
 def _reader() -> EvidenceReader:
@@ -120,6 +133,21 @@ async def test_an_off_allowlist_domain_must_pass_its_own_legitimacy_check():
     # Its verifier response (not on the allow-list, and this fake client
     # only confirms "SEC EDGAR" claims) correctly leaves it unconfirmed.
     assert result.claims_verified == 1
+
+
+async def test_a_curated_domain_still_gets_its_claim_independently_verified():
+    # Regression: an earlier version skipped the entire verification call
+    # for a curated domain, not just the redundant legitimacy question -
+    # weakening the "every claim is independently re-checked" guarantee.
+    # The claim itself must still go through a fresh, independent check.
+    reader = _reader()
+    client = _FakeClient()
+    await fill_evidence_gaps(
+        "run", "Example Corp", "EX", reader, None,
+        allowed_domains=_ALLOWED, max_claims=12, client=client,
+    )
+    sec_prompt = next(p for p in client.verify_calls if "SEC EDGAR" in p)
+    assert "legitimate" not in sec_prompt.lower()
 
 
 async def test_verified_candidate_becomes_citable_document_evidence():

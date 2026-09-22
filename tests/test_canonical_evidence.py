@@ -208,6 +208,25 @@ def test_eps_can_anchor_latest_reported_period_and_daily_prices_feed_chart(tmp_p
     assert reader.price_history() == (store.get("px"),)
 
 
+def test_latest_reported_period_prefers_fiscal_quarter_over_a_stale_period_end(tmp_path):
+    """Regression: SQLite sorts NULL last in DESC order, so ordering by
+    period_end first would always lose the true latest fiscal year/quarter
+    to any older row that merely happens to carry a period_end date."""
+    older_with_period_end = replace(
+        item("older", 100, period="FY2025 Q4"),
+        period=FiscalPeriod("FY2025 Q4", 2025, 4, period_end=dt.date(2025, 12, 31)),
+    )
+    newer_without_period_end = replace(
+        item("newer", 110, period="FY2026 Q3"),
+        period=FiscalPeriod("FY2026 Q3", 2026, 3),
+    )
+    store = EvidenceStore(tmp_path / "e.sqlite")
+    store.save(reconcile([older_with_period_end, newer_without_period_end]))
+    reader = EvidenceReader(store, "run", "SNDK", "Sandisk")
+
+    assert reader.latest_reported_period() == "FY2026 Q3"
+
+
 def test_metric_shape_collapses_array_indexes_for_small_llm_batches():
     assert Normalizer._metric_shape("NVDA.184.PX_LAST") == "NVDA.#.PX_LAST"
     assert Normalizer._metric_shape("BBG.12.periods.7.revenue") == "BBG.#.periods.#.revenue"

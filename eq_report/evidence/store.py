@@ -386,9 +386,18 @@ class EvidenceStore:
         if ticker:
             sql += " AND ticker = ?"
             params.append(ticker.upper())
+        # fiscal_year/fiscal_quarter first, period_end only as a tiebreaker:
+        # SQLite sorts NULL last in DESC order, so ordering by period_end
+        # first would always lose a row with the true latest fiscal
+        # year/quarter but no period_end (exactly the row the WHERE clause
+        # above was widened to keep) to any older row that merely happens to
+        # carry a period_end date - silently anchoring the report on a stale
+        # period. fiscal_year/fiscal_quarter is the more fundamental "which
+        # period is this" signal and is virtually always present for a
+        # reported revenue/EPS row, so it leads instead.
         sql += (
-            " ORDER BY period_end DESC, fiscal_year DESC, "
-            "COALESCE(fiscal_quarter, 5) DESC, "
+            " ORDER BY fiscal_year DESC, COALESCE(fiscal_quarter, 5) DESC, "
+            "period_end DESC, "
             "CASE WHEN metric = 'revenue' THEN 0 ELSE 1 END LIMIT 1"
         )
         row = self._conn.execute(sql, params).fetchone()

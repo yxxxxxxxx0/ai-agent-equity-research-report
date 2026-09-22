@@ -291,17 +291,30 @@ class Synthesizer:
         self, section: ReportSection, title: str, result: SegmentResult
     ) -> ReportSectionDraft:
         findings = self._findings_for_section(section, result)
-        # Catalysts deliberately shares its source findings with Risks: the
-        # shared risk/catalyst agent may tag one finding with both labels so
-        # it can serve both sections (see agents/llm_agent.py's system
-        # prompt). Risks builds first and registers its statements in the
-        # cross-section dedup scope, so without this, every double-tagged
-        # finding would be stripped back out of Catalysts as a "repeat of
-        # itself" - defeating the entire point of allowing both tags, and
-        # the actual reason Catalysts kept coming back empty even when the
-        # agent produced real, on-topic findings for it.
-        dedupe = section is not ReportSection.CATALYSTS
-        statements = self._statements(findings, dedupe=dedupe)
+        if section is ReportSection.CATALYSTS:
+            # Catalysts deliberately shares its source findings with Risks:
+            # the shared risk/catalyst agent may tag one finding with both
+            # labels so it can serve both sections (see agents/llm_agent.py's
+            # system prompt). Risks builds first and registers its
+            # statements in the cross-section dedup scope, so a double-tagged
+            # finding would otherwise be stripped back out of Catalysts as a
+            # "repeat of itself" - defeating the entire point of allowing
+            # both tags, and the actual reason Catalysts kept coming back
+            # empty even when the agent produced real, on-topic findings for
+            # it. Un-registering exactly the fingerprints Risks contributed
+            # from this same result (not a blanket dedupe=False) means
+            # Catalysts' statements still register themselves normally
+            # afterward, so a *later* section is still correctly deduped
+            # against whatever Catalysts ends up printing.
+            risk_fingerprints = {
+                self._fingerprint_for(f)
+                for f in self._findings_for_section(ReportSection.RISKS, result)
+            }
+            self._seen_fingerprints = [
+                (fp, ids) for fp, ids in self._seen_fingerprints
+                if fp not in risk_fingerprints
+            ]
+        statements = self._statements(findings)
 
         return ReportSectionDraft(
             section=section,
@@ -355,6 +368,16 @@ class Synthesizer:
             findings = tuple(f for f in findings if _tag_matches(f.tags, "catalyst"))
         return tuple(sorted(findings, key=lambda f: (f.materiality, _claim_rank(f.claim_type))))
 
+    @staticmethod
+    def _softened_text(finding: KeyFinding) -> str:
+        text = normalise_terminology(finding.claim)
+        return soften_unsupported_causation(
+            text, supported=finding.claim_type in _CAUSATION_ACCEPTABLE_CLAIM_TYPES)
+
+    @classmethod
+    def _fingerprint_for(cls, finding: KeyFinding) -> frozenset[str]:
+        return claim_fingerprint(cls._softened_text(finding))
+
     def _statements(
         self, findings: tuple[KeyFinding, ...], *, dedupe: bool = True
     ) -> tuple[Statement, ...]:
@@ -377,10 +400,8 @@ class Synthesizer:
         statements: list[Statement] = []
         local_seen: list[tuple[frozenset[str], frozenset[str]]] = []
         for finding in findings:
-            text = normalise_terminology(finding.claim)
-            text = soften_unsupported_causation(
-                text, supported=finding.claim_type in _CAUSATION_ACCEPTABLE_CLAIM_TYPES)
-            fingerprint = claim_fingerprint(text)
+            text = self._softened_text(finding)
+            fingerprint = self._fingerprint_for(finding)
             ids = frozenset((*finding.evidence_ids, *finding.analytics_ids))
             scope = self._seen_fingerprints if dedupe else local_seen
             if any(

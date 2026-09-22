@@ -70,3 +70,15 @@ def test_a_finding_double_tagged_risk_and_catalyst_survives_in_both_sections():
     assert len(risks.statements) == 1
     assert len(catalysts.statements) == 1
     assert synthesizer._duplicates_removed == 0
+
+    # Regression: a fix that let Catalysts through by simply not registering
+    # its own statements at all (dedupe=False) would stop a *later* section
+    # from ever being deduped against what Catalysts just printed.
+    later = SegmentResult(segment=None, headline="", key_findings=(KeyFinding(
+        claim="Apple's October 29 earnings release is the next dated financial checkpoint.",
+        claim_type=ClaimType.CONFIRMED_FACT, evidence_ids=("ev-1",),
+    ),))
+    what_matters_next = synthesizer._build_section(
+        ReportSection.WHAT_MATTERS_NEXT, "What Matters Next", later)
+    assert what_matters_next.statements == ()
+    assert synthesizer._duplicates_removed == 1
