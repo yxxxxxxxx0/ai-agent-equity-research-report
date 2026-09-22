@@ -471,9 +471,16 @@ class PdfReportRenderer:
             story.append(Spacer(1, 6))
             story.append(self._omissions_box(omitted, styles))
 
-        if qa_result is not None and qa_result.warnings:
+        # narrative.section_omitted warnings restate the omissions box above
+        # under a second heading - the report already disclosed the drop as
+        # an editorial choice, so it isn't a QA-worthy defect to flag again.
+        printable_warnings = [
+            finding for finding in (qa_result.warnings if qa_result else [])
+            if finding.check != "narrative.section_omitted"
+        ]
+        if printable_warnings:
             story.append(Spacer(1, 6))
-            story.append(self._qa_box(qa_result, styles))
+            story.append(self._qa_box(printable_warnings, styles))
         return story
 
     # -- key data panel --------------------------------------------------
@@ -623,9 +630,9 @@ class PdfReportRenderer:
         ]))
         return table
 
-    def _qa_box(self, qa_result: QAResult, styles) -> Table:
+    def _qa_box(self, warnings: list, styles) -> Table:
         heading = Paragraph(
-            f"QA review — {len(qa_result.warnings)} warning(s) raised before "
+            f"QA review — {len(warnings)} warning(s) raised before "
             "publication", styles["qa_head"])
         # This box is a short preview near the top of the report, not the
         # authoritative disclosure (that's the Sources section's data-gap
@@ -635,11 +642,11 @@ class PdfReportRenderer:
         items = [
             Paragraph(f"● <b>{_escape(finding.check)}</b> — {_escape(finding.message)}",
                       styles["gap"])
-            for finding in qa_result.warnings[:6]
+            for finding in warnings[:6]
         ]
-        if len(qa_result.warnings) > 6:
+        if len(warnings) > 6:
             items.append(Paragraph(
-                f"● and {len(qa_result.warnings) - 6} further warning(s); "
+                f"● and {len(warnings) - 6} further warning(s); "
                 "see the run manifest.", styles["gap"]))
         return self._qa_callout(heading, items, styles)
 
