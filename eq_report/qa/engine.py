@@ -60,6 +60,8 @@ class QAEngine:
         # opt-in alongside EQR_WEB_FILL_GAPS, since it only has work to do
         # when that stage produced something to recheck.
         self._verify_web_claims = verify_web_claims
+        # Web claims already re-confirmed by this engine (one engine per run).
+        self._web_confirmed: set[str] = set()
 
     async def validate(
         self,
@@ -73,7 +75,8 @@ class QAEngine:
         checks_run: list[str] = []
         if self._verify_web_claims:
             web_audit = await reverify_web_claims(
-                draft, reader, self._model_config, tracker=self._tracker)
+                draft, reader, self._model_config, tracker=self._tracker,
+                confirmed=self._web_confirmed)
             checks_run.append("web_claim_auditor")
             if web_audit.rejected:
                 log_event(

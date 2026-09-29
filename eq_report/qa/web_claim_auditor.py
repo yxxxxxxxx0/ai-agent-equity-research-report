@@ -18,6 +18,7 @@ evidence-provenance failure handles.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, replace
 from typing import Any
@@ -59,6 +60,7 @@ async def reverify_web_claims(
     *,
     tracker: UsageTracker | None = None,
     client: Any | None = None,
+    confirmed: set[str] | None = None,
 ) -> WebClaimAuditResult:
     """Best-effort: never raises. Demotes a claim's Evidence Store row to
     REJECTED when a fresh, independent search can no longer confirm it - the
@@ -73,11 +75,17 @@ async def reverify_web_claims(
     if not cited_ids:
         return WebClaimAuditResult()
 
+    # QA runs several times per report (initial pass, each repair round);
+    # ``confirmed`` is the caller's per-run memory of claims already
+    # re-confirmed, so each is searched once per run - never persisted, so
+    # a later run (or resume) still re-checks it fresh.
+    confirmed = confirmed if confirmed is not None else set()
     web_items = [
-        item for evidence_id in cited_ids
+        item for evidence_id in sorted(cited_ids)
         if (item := reader.get(evidence_id)) is not None
         and item.retrieval_provider == "web_gap_fill"
         and item.status is EvidenceStatus.VALIDATED
+        and item.evidence_id not in confirmed
     ][:_MAX_REVERIFICATIONS]
     if not web_items:
         return WebClaimAuditResult()
@@ -88,8 +96,7 @@ async def reverify_web_claims(
         client = OpenRouterJSONClient(model_config, tracker=tracker)
 
     schema = {"verified": "JSON boolean true or false (not a string)", "note": "one short sentence on what you found"}
-    rejected: list[str] = []
-    for item in web_items:
+    async def check(item):
         prompt = (
             f"Company: {item.company} ({item.ticker or 'ticker unknown'})\n"
             f"Claim: {item.claim_text}\n"
@@ -102,19 +109,29 @@ async def reverify_web_claims(
         except Exception as exc:  # noqa: BLE001 - one failed recheck must not sink the rest
             log_event(logger, logging.WARNING, "web claim re-verification call failed",
                       evidence_id=item.evidence_id, error=f"{type(exc).__name__}: {exc}")
-            continue
-        payload = response.payload if isinstance(response.payload, dict) else {}
+            return item, None
+        return item, (response.payload if isinstance(response.payload, dict) else {})
+
+    # Independent searches, so they run concurrently rather than back to back.
+    results = await asyncio.gather(*(check(item) for item in web_items))
+    rejected: list[str] = []
+    updates = []
+    for item, payload in results:
+        if payload is None:
+            continue  # call failed: leave it unmarked so a later pass retries it
         if is_true(payload.get("verified")):
+            confirmed.add(item.evidence_id)
             continue
-        updated = replace(
+        updates.append(replace(
             item, status=EvidenceStatus.REJECTED,
             validation_messages=item.validation_messages + (
                 "qa: pre-publication re-verification could not confirm this claim "
                 f"({payload.get('note') or 'no note'}).",
             ),
-        )
-        reader.store.replace([updated])
+        ))
         rejected.append(item.evidence_id)
+    if updates:
+        reader.store.replace(updates)
 
     log_event(logger, logging.INFO, "web claim re-verification complete",
               checked=len(web_items), rejected=len(rejected))
