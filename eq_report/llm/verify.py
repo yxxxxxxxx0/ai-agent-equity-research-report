@@ -27,6 +27,18 @@ from .usage import UsageTracker
 logger = logging.getLogger("eq_report.llm.verify")
 
 
+def is_true(value: Any) -> bool:
+    """Read a model's yes/no field strictly.
+
+    Models answer a boolean as ``true`` or as the string ``"true"``. Plain
+    truthiness is wrong for the second form: ``"false"`` is a non-empty
+    string, so ``if payload.get("verified")`` would accept a rejection.
+    """
+    if isinstance(value, bool):
+        return value
+    return isinstance(value, str) and value.strip().lower() == "true"
+
+
 @dataclass(frozen=True, slots=True)
 class VerifiedNumber:
     """The outcome of checking one LLM-proposed number against code.

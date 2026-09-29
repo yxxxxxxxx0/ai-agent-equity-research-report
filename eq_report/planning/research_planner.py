@@ -45,7 +45,8 @@ _REPORT_OUTLINE = (
     "6. Management Outlook — What Does the Company Expect Next?",
     "7. Consensus & Estimate Revisions — What Does the Market Expect?",
     "8. Valuation & Market-Implied Expectations — What Is Priced In?",
-    "9. Market Debates & Positioning — Where Could Expectations Be Wrong?",
+    "9. Market Debates & Positioning — Where Could Expectations Be Wrong? "
+    "(segment: market_commentary - named analyst/executive views)",
     "10. Catalysts, Risks & Observation Points — What Could Change Expectations?",
     "11. Monitoring Dashboard — What Should We Watch?",
     "12. Final — What Matters Next?",
@@ -56,7 +57,7 @@ _DATASETS = (
                        ("/api/bbg/company_details/data", "/api/bbg/sector_taxonomy/data", "/api/bbg/target_universe/data"),
                        "Resolve the issuer, classification, benchmark and relevant peers", 1),
     DatasetRequirement("market_data", ("ohlcv", "price", "market_cap", "adv", "returns", "volatility"),
-                       ("/api/bbg/ohlcv/data", "/api/bbg/market-cap/data", "/api/market/bbg/data", "/api/market/tradestation/ohlcuvdv"),
+                       ("/api/bbg/ohlcv/data", "/api/bbg/market-cap/data", "/api/market/bbg/data", "/api/market-tradestation/ohlcuvdv"),
                        "Measure company and benchmark performance, liquidity and positioning", 1),
     # /api/bbg/indicators/data was previously listed here and in
     # segments_and_kpis below - confirmed via this deployment's own
@@ -191,6 +192,7 @@ _SECTION_TO_SEGMENT: dict[ReportSection, SegmentName] = {
     ReportSection.COMPETITIVE_LANDSCAPE: SegmentName.COMPETITIVE_LANDSCAPE,
     ReportSection.RISKS: SegmentName.RISKS_CATALYSTS,
     ReportSection.CATALYSTS: SegmentName.RISKS_CATALYSTS,
+    ReportSection.MARKET_COMMENTARY: SegmentName.MARKET_COMMENTARY,
     ReportSection.WHAT_MATTERS_NEXT: SegmentName.WHAT_MATTERS_NEXT,
     # KEY_TAKEAWAYS and SOURCES are produced by the synthesis layer, not an agent.
 }
@@ -225,6 +227,10 @@ _QUESTION_LIBRARY: tuple[tuple[str, str, SegmentName, int], ...] = (
      SegmentName.RISKS_CATALYSTS, 1),
     ("q_catalysts", "What are the important near-term catalysts?",
      SegmentName.RISKS_CATALYSTS, 1),
+    ("q_market_commentary",
+     "What do named sell-side analysts and other identifiable commentators "
+     "currently say about the stock, and does their view cluster or diverge?",
+     SegmentName.MARKET_COMMENTARY, 2),
     ("q_monitor", "What should investors monitor next?",
      SegmentName.WHAT_MATTERS_NEXT, 1),
 )
@@ -266,6 +272,8 @@ _SEGMENT_OBJECTIVES: dict[SegmentName, str] = {
         "Identify the material risks to the trajectory and the near-term catalysts.",
     SegmentName.WHAT_MATTERS_NEXT:
         "State the specific, observable items an investor should monitor next.",
+    SegmentName.MARKET_COMMENTARY:
+        "Report named analyst and executive views, attributed to the person and date.",
 }
 
 _DEFAULT_SOURCE_PRIORITIES: tuple[SourceType, ...] = (
@@ -280,6 +288,13 @@ _DEFAULT_SOURCE_PRIORITIES: tuple[SourceType, ...] = (
     SourceType.INDUSTRY_RESEARCH,
     SourceType.COMPETITOR_FILING,
 )
+
+
+def _clean_company_name(name: str) -> str:
+    """Drop a trailing parenthetical note the planner model appends to the
+    name (e.g. "Apple Inc. (AAPL; identity to be verified)"), which would
+    otherwise be printed in every report title."""
+    return re.sub(r"\s*\([^)]*\)\s*$", "", name).strip() or name
 
 
 class ResearchPlanner:
@@ -485,9 +500,14 @@ class ResearchPlanner:
         seen_segments = set(task_positions)
         expected_segments = set(self._segments_for(request.sections))
         missing_segments = expected_segments - seen_segments
-        if missing_segments:
-            missing = ", ".join(sorted(segment.value for segment in missing_segments))
-            raise ValueError(f"Model research plan omitted required segments: {missing}")
+        # A segment the model forgot gets its deterministic default task
+        # rather than aborting the whole run before acquisition.
+        for segment in sorted(missing_segments, key=lambda s: s.value):
+            tasks.append(SegmentTask(
+                segment=segment,
+                objective=_SEGMENT_OBJECTIVES[segment],
+                required_analytics=_SEGMENT_ANALYTICS.get(segment, ()),
+            ))
 
         documents = tuple(
             DocumentRequirement(
@@ -535,6 +555,14 @@ class ResearchPlanner:
                 search_requests.append(SearchRequest(
                     request_id=str(row["request_id"]), query=str(row["query"]),
                     endpoint=endpoint, purpose=str(row.get("purpose", "")),
+                    # Bound to the report date server-side (the API's real
+                    # date_to filter) rather than trusting the model's own
+                    # "through <date>" phrasing in free-text query strings to
+                    # be respected by semantic similarity.
+                    date_to=(request.report_date.isoformat()
+                             if endpoint == "/api/vector-search/search" else None),
+                    top_k=10 if endpoint == "/api/vector-search/search" else None,
+                    exclude_same_source=(endpoint == "/api/vector-search/search"),
                 ))
                 continue
             branch = _ENDPOINT_BRANCH.get(endpoint)
@@ -557,6 +585,8 @@ class ResearchPlanner:
                 query=(f"{ticker} named analyst industry expert KOL commentary view "
                        f"speaker role date source through {request.report_date.isoformat()}"),
                 purpose="Capture attributable expert views and distinguish opinion from fact.",
+                date_to=request.report_date.isoformat(), top_k=10,
+                exclude_same_source=True,
             ),
             SearchRequest(
                 request_id="kol_counterview_news",
@@ -571,7 +601,7 @@ class ResearchPlanner:
             raise ValueError("Model research plan contained no Megadata API requests")
         return ResearchPlan(
             request=request,
-            company=str(payload.get("company") or ticker),
+            company=_clean_company_name(str(payload.get("company") or ticker)),
             ticker=ticker,
             peers=tuple(str(p).upper() for p in payload.get("peers", [])),
             questions=questions,

@@ -60,6 +60,7 @@ from ..evidence.reader import EvidenceReader
 from ..llm.client import OpenRouterJSONClient
 from ..llm.usage import UsageTracker
 from ..logging_setup import get_logger, log_event
+from ..llm.verify import is_true
 
 logger = get_logger("pipeline.web_gap_fill")
 
@@ -360,7 +361,7 @@ async def _verify_candidates(
     real domain, but a live search knows what apple.com is.
     """
     schema = {
-        "verified": "true or false",
+        "verified": "JSON boolean true or false (not a string)",
         "confirmed_published_date": "YYYY-MM-DD if the page states one, else null",
         "note": "one short sentence on what you found",
     }
@@ -388,7 +389,7 @@ async def _verify_candidates(
                       topic=candidate["topic"], error=f"{type(exc).__name__}: {exc}")
             continue
         payload = response.payload if isinstance(response.payload, dict) else {}
-        if not payload.get("verified"):
+        if not is_true(payload.get("verified")):
             continue
         confirmed_date = payload.get("confirmed_published_date") or candidate["published_date"]
         confirmed.append({**candidate, "published_date": confirmed_date})

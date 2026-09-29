@@ -36,6 +36,7 @@ from ..llm.client import OpenRouterJSONClient
 from ..llm.usage import UsageTracker
 from ..llm.verify import safe_complete_json
 from ..logging_setup import get_logger, log_event
+from ..llm.verify import is_true
 
 logger = get_logger("qa.auditor")
 
@@ -185,7 +186,7 @@ class QAAuditor:
         """
         client = OpenRouterJSONClient(self._model_config, tracker=self._tracker)
         schema = {
-            "found": "true or false",
+            "found": "JSON boolean true or false (not a string)",
             "matched_value": "the number the source states, only if found is true",
             "source_name": "the publisher or site name, only if found is true",
             "source_url": "the exact URL of the page you found this on, only if found is true",
@@ -219,7 +220,7 @@ class QAAuditor:
                           metric=group["metric"], error=f"{type(exc).__name__}: {exc}")
                 continue
             payload = response.payload if isinstance(response.payload, dict) else {}
-            if not payload.get("found"):
+            if not is_true(payload.get("found")):
                 continue
             url = str(payload.get("source_url", "")).strip()
             source_name = str(payload.get("source_name", "")).strip()

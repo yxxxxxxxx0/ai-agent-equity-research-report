@@ -24,6 +24,7 @@ from .company_snapshot import CompanySnapshotAgent
 from .competitive_landscape import CompetitiveLandscapeAgent
 from .financial_performance import FinancialPerformanceAgent
 from .llm_agent import VerifiedSegmentAgent
+from .market_commentary import MarketCommentaryAgent
 from .operating_drivers import OperatingDriversAgent
 from .recent_developments import RecentDevelopmentsAgent
 from .risks_catalysts import RiskCatalystAgent
@@ -42,6 +43,7 @@ AGENT_REGISTRY: dict[SegmentName, type[SegmentAgent]] = {
     SegmentName.VALUATION: ValuationAgent,
     SegmentName.COMPETITIVE_LANDSCAPE: CompetitiveLandscapeAgent,
     SegmentName.RISKS_CATALYSTS: RiskCatalystAgent,
+    SegmentName.MARKET_COMMENTARY: MarketCommentaryAgent,
     SegmentName.WHAT_MATTERS_NEXT: WhatMattersNextAgent,
 }
 

@@ -5,10 +5,15 @@ or the QA verdict. Every proposed edit is applied to the existing structured
 draft and the normal deterministic QA suite is run again by the orchestrator.
 If a local narrative error cannot be repaired safely, the offending statement
 is omitted; evidence-level and arithmetic failures remain hard blockers.
+
+A statement the entailment reviewer rejected is repaired by subtraction only:
+the model trims it to the parts the reviewer said its cited evidence supports,
+and the orchestrator's QA re-run (entailment included) must then pass it.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -19,7 +24,6 @@ from ..domain.report import ReportDraft, Statement
 from ..evidence.reader import EvidenceReader
 from ..llm.usage import UsageTracker
 from ..llm.verify import safe_complete_json
-from .checks import has_asserted_numeric_fact
 
 _REPAIRABLE_STATEMENT_CHECKS = frozenset({
     "evidence.reference_exists",
@@ -29,15 +33,50 @@ _REPAIRABLE_STATEMENT_CHECKS = frozenset({
     "evidence.claim_supported",
     "evidence.numeric_claim_not_canonical",
     "evidence.web_claim_not_reverified",
+    "evidence.claim_not_entailed",
 })
 
-_REWRITEABLE_CHECKS = frozenset({"evidence.numeric_claim_not_canonical"})
+_NUMERIC_CHECK = "evidence.numeric_claim_not_canonical"
+_ENTAILMENT_CHECK = "evidence.claim_not_entailed"
+_REWRITEABLE_CHECKS = frozenset({_NUMERIC_CHECK, _ENTAILMENT_CHECK})
 
 _SYSTEM_PROMPT = """You repair a structured equity-research draft after deterministic QA.
-You may only remove unsupported numerical assertions from prose. Preserve the meaning that is
-supported by the supplied evidence excerpts, do not add facts, dates, quantities, citations,
-or source ids, and do not guess. If a safe useful rewrite is impossible, choose omit. Return
-JSON only in the requested shape."""
+Each statement lists the QA checks it failed. Repair only by removing content - never by
+adding it:
+
+* evidence.claim_not_entailed: the statement's reviewer_reasons say which parts of the claim
+  the cited evidence supports and which it does not. Rewrite the statement to keep only the
+  supported parts and delete the unsupported clauses entirely. Do not turn an unsupported
+  clause into a hedge ("may", "could indicate", "will help assess") - delete it.
+* evidence.numeric_claim_not_canonical: keep a figure only if it appears verbatim in one of
+  the statement's evidence excerpts (and attribute it to that source, e.g. "Zacks cited
+  33.54x"); remove every figure you computed or that no excerpt states.
+
+Do not add facts, dates, quantities, causes, comparisons, citations or source ids that are
+not already in the statement, and do not guess. The result must still tell the reader
+something concrete about the company; if all that would remain is a bare date, a title, or a
+sentence with no information, choose omit. Return JSON only in the requested shape."""
+
+_NUMBER_TOKEN = re.compile(r"\d[\d,.]*")
+
+
+def _numbers(text: str) -> set[str]:
+    return {m.group().rstrip(".,") for m in _NUMBER_TOKEN.finditer(text)}
+
+
+def _entailment_reason(finding: QAFinding) -> str:
+    prefix = "Mapped source does not support the complete claim: "
+    message = finding.message or ""
+    return message[len(prefix):] if message.startswith(prefix) else message
+
+
+def _safe_rewrite(original: str, rewritten: str, checks: frozenset[str]) -> bool:
+    """A repair may only remove content: no figure the original did not state.
+
+    Whether a kept figure is publishable (canonical, or quoted verbatim from a
+    cited passage) is decided by the orchestrator's QA re-run, not here.
+    """
+    return _numbers(rewritten) <= _numbers(original)
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,11 +149,15 @@ class DraftRepairer:
                     except (TypeError, ValueError):
                         continue
                     text = str(row.get("rewritten_text") or "").strip()
-                    if 0 <= index < len(rewriteable) and text \
-                            and not has_asserted_numeric_fact(text):
-                        proposals[id(rewriteable[index][1])] = text
+                    if not (0 <= index < len(rewriteable)) or not text:
+                        continue
+                    _section, statement, checks, _reasons = rewriteable[index]
+                    if _safe_rewrite(statement.text, text, checks):
+                        proposals[id(statement)] = text
 
         repaired, events = _apply_statement_repairs(draft, targets, proposals)
+        repaired, summary_events = _drop_unsupported_summaries(repaired, qa.critical)
+        events = events + summary_events
         repaired = _repair_draft_metadata(repaired, qa.critical)
         return RepairOutcome(
             draft=repaired,
@@ -124,10 +167,13 @@ class DraftRepairer:
         )
 
 
+_Target = tuple[str, Statement, frozenset[str], tuple[str, ...]]
+
+
 def _statement_targets(
     draft: ReportDraft, findings: tuple[QAFinding, ...],
-) -> list[tuple[str, Statement, frozenset[str]]]:
-    matches: dict[tuple[str, str], tuple[Statement, set[str]]] = {}
+) -> list[_Target]:
+    matches: dict[tuple[str, str], tuple[Statement, set[str], list[str]]] = {}
     for finding in findings:
         if finding.check not in _REPAIRABLE_STATEMENT_CHECKS \
                 or not finding.section or not finding.subject:
@@ -140,28 +186,29 @@ def _statement_targets(
                         or statement.text.startswith(finding.subject) \
                         or finding.subject.startswith(statement.text):
                     key = (section.section.value, statement.text)
-                    current, checks = matches.setdefault(key, (statement, set()))
+                    _stmt, checks, reasons = matches.setdefault(key, (statement, set(), []))
                     checks.add(finding.check)
-                    matches[key] = (current, checks)
+                    if finding.check == _ENTAILMENT_CHECK:
+                        reasons.append(_entailment_reason(finding))
                     break
     return [
-        (section, statement, frozenset(checks))
-        for (section, _text), (statement, checks) in matches.items()
+        (section, statement, frozenset(checks), tuple(reasons))
+        for (section, _text), (statement, checks, reasons) in matches.items()
     ]
 
 
 def _prompt_row(
-    index: int, target: tuple[str, Statement, frozenset[str]],
-    reader: EvidenceReader, analytics: AnalyticsBundle,
+    index: int, target: _Target, reader: EvidenceReader, analytics: AnalyticsBundle,
 ) -> dict[str, Any]:
-    section, statement, checks = target
+    section, statement, checks, reasons = target
     evidence = []
     for evidence_id in statement.evidence_ids:
         item = reader.get(evidence_id)
         if item is not None:
             evidence.append({
                 "evidence_id": evidence_id,
-                "claim_text": (item.claim_text or "")[:600],
+                # Same excerpt length the entailment reviewer judged against.
+                "claim_text": (item.claim_text or "")[:700],
                 "metric": item.metric,
                 "value": item.value,
                 "unit": item.unit,
@@ -179,7 +226,7 @@ def _prompt_row(
         }
         for analytic_id in statement.analytics_ids if analytic_id in analytics_by_id
     ]
-    return {
+    row: dict[str, Any] = {
         "index": index,
         "section": section,
         "text": statement.text,
@@ -187,14 +234,19 @@ def _prompt_row(
         "evidence": evidence,
         "analytics": analytic_rows,
     }
+    if reasons:
+        row["reviewer_reasons"] = list(reasons)
+    return row
 
 
 def _apply_statement_repairs(
     draft: ReportDraft,
-    targets: list[tuple[str, Statement, frozenset[str]]],
+    targets: list[_Target],
     proposals: dict[int, str],
 ) -> tuple[ReportDraft, tuple[RepairEvent, ...]]:
-    by_statement = {id(statement): (section, checks) for section, statement, checks in targets}
+    by_statement = {
+        id(statement): (section, checks) for section, statement, checks, _reasons in targets
+    }
     events: list[RepairEvent] = []
     sections = []
     for section in draft.sections:
@@ -223,6 +275,68 @@ def _apply_statement_repairs(
                     checks=tuple(sorted(checks)),
                 ))
         sections.append(replace(section, statements=tuple(statements)))
+    return replace(draft, sections=tuple(sections)), tuple(events)
+
+
+def tidy_draft(draft: ReportDraft, qa: QAResult) -> ReportDraft:
+    """Deterministic editorial cleanup after QA: no repeats, no empty headings.
+
+    A statement QA flagged as a verbatim repeat is removed from the later
+    section (the finding names that one), and a section left with neither
+    statements nor a summary is dropped and recorded as omitted rather than
+    printed as a bare heading.
+    """
+    repeats = {
+        (f.section, f.subject) for f in qa.findings
+        if f.check == "narrative.duplication" and f.section and f.subject
+    }
+    omitted = list(draft.metadata.get("sections_omitted", []))
+    sections = []
+    for section in draft.sections:
+        statements = tuple(
+            s for s in section.statements
+            if not any(sec == section.section.value and s.text.startswith(subj)
+                       for sec, subj in repeats)
+        )
+        section = replace(section, statements=statements)
+        if not statements and not section.summary and section.section.value != "sources":
+            omitted.append({"section": section.section.value,
+                            "reason": "nothing publishable remained after QA repair"})
+            continue
+        sections.append(section)
+    return replace(draft, sections=tuple(sections),
+                   metadata={**draft.metadata, "sections_omitted": omitted})
+
+
+_SUMMARY_CHECKS = _REPAIRABLE_STATEMENT_CHECKS | {
+    "evidence.summary_supported", "evidence.summary_traceable",
+}
+
+
+def _drop_unsupported_summaries(
+    draft: ReportDraft, findings: tuple[QAFinding, ...],
+) -> tuple[ReportDraft, tuple[RepairEvent, ...]]:
+    """A section standfirst QA rejected is removed; the section body stands on its own."""
+    failing: dict[str, set[str]] = {}
+    for finding in findings:
+        if finding.check in _SUMMARY_CHECKS and finding.section and finding.subject:
+            failing.setdefault(finding.section, set()).add(finding.check)
+    events: list[RepairEvent] = []
+    sections = []
+    for section in draft.sections:
+        checks = failing.get(section.section.value)
+        subject_matches = section.summary and any(
+            f.subject and (section.summary.startswith(f.subject) or f.subject.startswith(section.summary))
+            for f in findings if f.section == section.section.value
+        )
+        if checks and subject_matches:
+            events.append(RepairEvent(
+                section=section.section.value, original_text=section.summary,
+                action="summary_omit", checks=tuple(sorted(checks)),
+            ))
+            section = replace(section, summary="", summary_evidence_ids=(),
+                              summary_analytics_ids=(), summary_citation_refs=())
+        sections.append(section)
     return replace(draft, sections=tuple(sections)), tuple(events)
 
 

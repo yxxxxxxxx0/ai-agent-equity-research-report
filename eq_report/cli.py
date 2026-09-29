@@ -25,9 +25,15 @@ def build_parser() -> argparse.ArgumentParser:
         prog="eq_report",
         description="Generate a draft equity research report for a ticker.",
     )
-    parser.add_argument("--ticker", required=True, help="ticker symbol, e.g. NVDA")
-    parser.add_argument("--report-date", required=True,
-                        help="report as-of date (YYYY-MM-DD)")
+    parser.add_argument("--ticker", help="ticker symbol, e.g. NVDA")
+    parser.add_argument("--report-date", help="report as-of date (YYYY-MM-DD)")
+    parser.add_argument(
+        "--resume", metavar="RUN_ID",
+        help="re-run analysis/synthesis/QA/rendering for an existing report_run_id "
+             "(from a prior run's output directory), reusing its saved plan and "
+             "Evidence Store rows instead of re-running planning and acquisition. "
+             "--ticker/--report-date are ignored when this is set.",
+    )
     parser.add_argument("--output-dir", type=Path, help="where to write run artefacts")
     parser.add_argument("--technical-appendix", action="store_true",
                         help="append the one-page technical-analysis supplement")
@@ -39,9 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def build_request(args: argparse.Namespace) -> ResearchRequest:
-    ticker = args.ticker.strip().upper()
-    if not ticker:
+    if not args.ticker or not args.ticker.strip():
         raise SystemExit("--ticker must not be empty.")
+    ticker = args.ticker.strip().upper()
+    if not args.report_date:
+        raise SystemExit("--report-date is required.")
     try:
         report_date = dt.date.fromisoformat(args.report_date)
     except ValueError as exc:
@@ -52,7 +60,11 @@ def build_request(args: argparse.Namespace) -> ResearchRequest:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    request = build_request(args)
+
+    if args.resume and args.print_request:
+        raise SystemExit("--print-request has no effect with --resume.")
+
+    request = None if args.resume else build_request(args)
 
     if args.print_request:
         print(json.dumps(request.to_dict(), indent=2))
@@ -65,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
             technical_appendix=settings.technical_appendix or args.technical_appendix,
             compact_report=settings.compact_report or args.compact_report,
         )
-    result = generate_report_sync(request, settings)
+    result = generate_report_sync(request, settings, resume_from=args.resume)
 
     print()
     print(result.summary())

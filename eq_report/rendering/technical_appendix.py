@@ -15,6 +15,7 @@ from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen.canvas import Canvas
 
 from ..config import ProviderCredentials
+from ..providers.rate_limit import megadata_limiter
 
 
 def _fetch_bloomberg_ohlcv(
@@ -23,6 +24,7 @@ def _fetch_bloomberg_ohlcv(
     credentials: ProviderCredentials,
     *,
     timeout: int = 30,
+    min_request_interval_seconds: float = 0.5,
 ) -> tuple[list[tuple[dt.date, float, float, float, float, float]], str]:
     """Return Bloomberg daily OHLCV exclusively through MegadataAPI.
 
@@ -52,7 +54,9 @@ def _fetch_bloomberg_ohlcv(
     market_end_date = end_date - dt.timedelta(days=1)
     block: Any = None
     last_error: str | None = None
+    limiter = megadata_limiter(min_request_interval_seconds)
     for _ in range(10):
+        limiter.wait()
         response = requests.get(
             url,
             params={
@@ -357,6 +361,7 @@ def build_technical_appendix_pdf(
     page_label: str = "Page 1 of 1",
     credentials: ProviderCredentials | None = None,
     timeout: int = 30,
+    min_request_interval_seconds: float = 0.5,
 ) -> Path:
     """Fetch Bloomberg OHLCV from MegadataAPI, calculate indicators and draw
     the standalone appendix page - everything ``append_technical_appendix``
@@ -369,6 +374,7 @@ def build_technical_appendix_pdf(
     """
     rows, source_label = _fetch_bloomberg_ohlcv(
         ticker, end_date, credentials or ProviderCredentials(), timeout=timeout,
+        min_request_interval_seconds=min_request_interval_seconds,
     )
     dates, open_, high, low, close, volume = map(list, zip(*rows))
     ma10, ma20, ma50 = _sma(close, 10), _sma(close, 20), _sma(close, 50)

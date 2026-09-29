@@ -248,6 +248,38 @@ def check_web_claims_reverified(context: QAContext) -> list[QAFinding]:
     return findings
 
 
+#: Same excerpt length the entailment reviewer judges against
+#: (qa.entailment._MAX_EXCERPT_CHARS): a figure only counts as quoted if the
+#: reviewer could also see it.
+_QUOTE_WINDOW = 700
+
+
+def _numbers_quoted_from_sources(text: str, cited: list) -> bool:
+    """Every figure in the statement appears verbatim in a cited, validated passage.
+
+    A quoted third-party figure ("Zacks cited 33.54x") is attributable to its
+    publisher even though no structured feed carries it; the entailment
+    reviewer separately checks the sentence says what that passage says.
+    A number the writer derived (a ratio, a spread) is not in the passage
+    and still needs canonical numeric evidence.
+    """
+    passages = [
+        (item.claim_text or "")[:_QUOTE_WINDOW] for item in cited
+        if item.value is None and item.status.value == "validated" and item.claim_text
+    ]
+    if not passages:
+        return False
+    source = " ".join(passages).replace(",", "")
+    numbers = [
+        re.sub(r"[^\d.]", "", m.group().replace(",", "")).strip(".")
+        for m in _NUMBER_RE.finditer(_DATE_OR_PERIOD_RE.sub("", text))
+    ]
+    numbers = [n for n in numbers if n]
+    return bool(numbers) and all(
+        re.search(rf"(?<![\d.]){re.escape(n)}(?![\d])", source) for n in numbers
+    )
+
+
 def check_numeric_claims_use_canonical_evidence(context: QAContext) -> list[QAFinding]:
     """P0: document text is context, not a structured numerical fact."""
     findings: list[QAFinding] = []
@@ -258,6 +290,8 @@ def check_numeric_claims_use_canonical_evidence(context: QAContext) -> list[QAFi
             cited = [context.reader.get(eid) for eid in statement.evidence_ids]
             cited = [item for item in cited if item is not None]
             if cited and any(item.value is not None and item.is_canonical and item.status.value == "validated" for item in cited):
+                continue
+            if _numbers_quoted_from_sources(statement.text, cited):
                 continue
             findings.append(QAFinding(
                 check="evidence.numeric_claim_not_canonical",

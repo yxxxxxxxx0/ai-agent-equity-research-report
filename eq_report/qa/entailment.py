@@ -18,6 +18,7 @@ from ..domain.report import ReportDraft
 from ..evidence.reader import EvidenceReader
 from ..llm.client import OpenRouterJSONClient
 from ..llm.usage import UsageTracker
+from ..llm.verify import is_true
 
 _SYSTEM_PROMPT = """You are a conservative citation-entailment reviewer. For each report
 claim, decide whether its mapped source excerpts and calculations support the complete wording:
@@ -115,7 +116,7 @@ async def verify_claim_entailment(
     schema = {
         "results": [{
             "claim_id": "copied claim_id",
-            "supported": "true or false",
+            "supported": "JSON boolean true or false (not a string)",
             "reason": "short, specific explanation",
         }]
     }
@@ -140,7 +141,7 @@ async def verify_claim_entailment(
         if claim_id not in claim_meta or claim_id in reviewed:
             continue
         reviewed.add(claim_id)
-        if row.get("supported") is True:
+        if is_true(row.get("supported")):
             continue
         section, text = claim_meta[claim_id]
         findings.append(QAFinding(

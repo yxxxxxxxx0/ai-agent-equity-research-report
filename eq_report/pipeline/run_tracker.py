@@ -8,6 +8,7 @@ failed run is as inspectable as a successful one.
 from __future__ import annotations
 
 import datetime as dt
+import re
 import uuid
 from contextlib import contextmanager
 from typing import Any, Iterator
@@ -16,6 +17,9 @@ from ..domain.enums import RunStatus
 from ..domain.run import ReportRun, StageTiming
 from ..errors import PipelineError
 from ..logging_setup import set_run_id, stage_context
+
+
+RUN_ID_PATTERN = re.compile(r"run_\d{8}T\d{6}_[0-9a-f]{6}")
 
 
 def new_run_id() -> str:

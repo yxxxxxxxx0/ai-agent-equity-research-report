@@ -37,6 +37,7 @@ from ..llm.client import OpenRouterJSONClient
 from ..llm.usage import UsageTracker
 from ..logging_setup import get_logger, log_event
 from ..normalisation.dates import normalise_fiscal_period
+from ..llm.verify import is_true
 
 logger = get_logger("pipeline.freshness_check")
 
@@ -85,7 +86,7 @@ async def check_freshness(
 
     client = OpenRouterJSONClient(model_config, tracker=tracker)
     schema = {
-        "found": "true or false",
+        "found": "JSON boolean true or false (not a string)",
         "period_label": (
             "the most recent reported fiscal period, only if found is true, in canonical "
             "form 'FYnnnn Qn' for a quarter or 'FYnnnn' for a full year (e.g. 'FY2027 Q2') "
@@ -110,7 +111,7 @@ async def check_freshness(
         return FreshnessResult(checked=False)
 
     payload = response.payload if isinstance(response.payload, dict) else {}
-    if not payload.get("found"):
+    if not is_true(payload.get("found")):
         return FreshnessResult(checked=False)
 
     url = str(payload.get("source_url", "")).strip()

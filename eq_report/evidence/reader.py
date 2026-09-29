@@ -176,11 +176,18 @@ class EvidenceReader:
         *,
         limit: int | None = None,
     ) -> tuple[EvidenceItem, ...]:
-        """Document passages, most recently published first."""
+        """Validated document passages, most recently published first.
+
+        Scoped to ``status=VALIDATED`` like every other accessor on this
+        reader: an unverified passage (second-hand commentary that failed
+        or never reached corroboration) is context for research, not a
+        citable claim, and must not reach a segment agent's evidence pool.
+        """
         items = self.store.query(EvidenceQuery(
             report_run_id=self.report_run_id,
             category=EvidenceCategory.DOCUMENT,
             source_types=list(source_types) if source_types else None,
+            status=EvidenceStatus.VALIDATED,
             limit=limit,
             order_by="published_at DESC, evidence_id ASC",
         ))

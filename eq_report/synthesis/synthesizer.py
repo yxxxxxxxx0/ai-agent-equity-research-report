@@ -97,6 +97,7 @@ _SECTION_SPEC: dict[ReportSection, tuple[SegmentName | None, str]] = {
     ReportSection.VALUATION: (SegmentName.VALUATION, "Valuation and Market Expectations"),
     ReportSection.RISKS: (SegmentName.RISKS_CATALYSTS, "Uncertainties and Analytical Limitations"),
     ReportSection.CATALYSTS: (SegmentName.RISKS_CATALYSTS, "Upcoming Events and Monitoring Indicators"),
+    ReportSection.MARKET_COMMENTARY: (SegmentName.MARKET_COMMENTARY, "Market Commentary"),
     ReportSection.WHAT_MATTERS_NEXT: (SegmentName.WHAT_MATTERS_NEXT, "Forward Monitoring Framework"),
     ReportSection.SOURCES: (None, "Sources and Data Gaps"),
 }
@@ -112,6 +113,7 @@ _TAKEAWAY_ORDER: tuple[tuple[SegmentName, str], ...] = (
     (SegmentName.VALUATION, "valuation"),                # implication for the multiple
     (SegmentName.COMPETITIVE_LANDSCAPE, "competition"),  # relative position
     (SegmentName.RISKS_CATALYSTS, "risk"),               # what could break it
+    (SegmentName.MARKET_COMMENTARY, "sentiment"),        # how outside views are positioned
     (SegmentName.WHAT_MATTERS_NEXT, "monitor"),          # what matters next
 )
 

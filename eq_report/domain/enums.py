@@ -96,6 +96,7 @@ class SegmentName(StrEnum):
     VALUATION = "valuation"
     COMPETITIVE_LANDSCAPE = "competitive_landscape"
     RISKS_CATALYSTS = "risks_catalysts"
+    MARKET_COMMENTARY = "market_commentary"
     WHAT_MATTERS_NEXT = "what_matters_next"
 
 
@@ -111,6 +112,7 @@ class ReportSection(StrEnum):
     VALUATION = "valuation"
     RISKS = "risks"
     CATALYSTS = "catalysts"
+    MARKET_COMMENTARY = "market_commentary"
     WHAT_MATTERS_NEXT = "what_matters_next"
     #: Not requestable and never in DEFAULT_SECTIONS - built after synthesis,
     #: only when live web research (see pipeline.gap_research) fills a
@@ -130,6 +132,7 @@ DEFAULT_SECTIONS: tuple[ReportSection, ...] = (
     ReportSection.VALUATION,
     ReportSection.RISKS,
     ReportSection.CATALYSTS,
+    ReportSection.MARKET_COMMENTARY,
     ReportSection.WHAT_MATTERS_NEXT,
     ReportSection.SOURCES,
 )

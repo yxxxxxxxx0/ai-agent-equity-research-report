@@ -85,8 +85,13 @@ instruction.
 
 You may write one merged sentence that restates two or more given findings together, but
 every evidence_id/analytics_id you cite must be copied verbatim from the findings you were
-given - never invent, guess, or reuse an id from general knowledge. Return JSON only,
-matching the requested schema."""
+given - never invent, guess, or reuse an id from general knowledge. A merge is checked
+against the union of the findings it draws on: every clause in it must already appear,
+stated or clearly implied, in at least one of those findings. Do not add a connecting
+clause of your own (a cause, a test, a resolving variable, a scope like "the principal
+items to monitor") unless the findings themselves already say that - a takeaway that is
+shorter than its inputs but fully grounded in them is correct; one that adds an unstated
+bridge between them is not. Return JSON only, matching the requested schema."""
 
 
 class SynthesisLLMClient(Protocol):
@@ -202,8 +207,11 @@ a separate pass and may intentionally summarize facts that appear once in the bo
 Preserve all material information, neutrality, citations, factual qualifiers, periods and
 uncertainties. Do not introduce facts, investment recommendations, causal claims or evidence
 ids. A drop action is permitted only for information fully preserved in another supplied
-body finding. Every kept or shortened finding must retain its original provenance. Return
-JSON only."""
+body finding. Every kept or shortened finding must retain its original provenance: a
+"shorten" may cut words, but every clause left in the edited claim must already be present
+in that finding's original claim - never add a conclusion, cause, test, or resolving
+variable the original claim did not state, even one that sounds like a natural next
+sentence. Return JSON only."""
         schema = {
             "headlines": [{"segment": "exact supplied segment", "headline": "one line"}],
             "findings": [{

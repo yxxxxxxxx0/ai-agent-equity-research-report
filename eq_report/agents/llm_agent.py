@@ -56,6 +56,25 @@ _INLINE_ID_BLOCK = re.compile(
     r"\s*\[(?:\s*(?:ev|an)_[a-zA-Z0-9]+\s*,?)+\s*\]\s*"
 )
 
+#: Some acquired document passages (notably a whole SEC filing pulled as one
+#: row) carry hundreds of thousands of characters of raw text as
+#: ``claim_text``. Embedding one of those verbatim in a prompt reliably blows
+#: the model's context window - and since every segment agent draws from the
+#: same shared document pool (see ``_evidence_for``), one oversized row fails
+#: every agent in the run at once, not just the one that cited it. Cap what
+#: reaches the prompt to a citable excerpt; the full text remains in the
+#: Evidence Store for anything that needs it (e.g. a future full-text search).
+#: Must match qa.entailment._MAX_EXCERPT_CHARS: an agent must not cite text
+#: the reviewer is never shown.
+_MAX_CLAIM_TEXT_CHARS = 700
+
+
+def _excerpt(text: str | None) -> str | None:
+    if text is None or len(text) <= _MAX_CLAIM_TEXT_CHARS:
+        return text
+    return text[:_MAX_CLAIM_TEXT_CHARS] + " …[truncated]"
+
+
 #: Point-in-time metrics: looked up without a fiscal period.
 _POINT_METRICS: tuple[str, ...] = (
     "share_price", "market_cap", "forward_pe", "trailing_pe", "ev_to_sales",
@@ -134,6 +153,14 @@ written. Concretely:
   consequence and no implication attached is a table row, and the report already has tables.
 * Prefer "during the reported period" over language implying a durable trend, unless the
   supplied evidence spans enough periods to support a trend claim.
+* A finding is checked as a whole against its cited evidence_ids/analytics_ids: every clause
+  in it must be individually entailed by those specific rows, not merely related to their
+  topic. Do not fuse a supported fact with an added interpretive clause (a cause, a framework,
+  a comparison, a resolving variable, a scope claim like "across all segments") unless that
+  addition is itself stated in the cited rows. If the evidence supports the core fact but not
+  the elaboration you want to add, either cite additional rows that actually support the
+  elaboration, or write only the supported fact and stop - a shorter, fully-supported finding
+  is correct; a longer one with an unsupported clause is not.
 
 Return 3-6 substantive findings when the evidence supports them - fewer, if that is all the
 evidence carries. Each finding should be one compact analytical paragraph of 2-3 sentences
@@ -245,7 +272,7 @@ class LLMSegmentAgent(SegmentAgent):
                 "unit": item.unit,
                 "period": item.period_label,
                 "as_of": item.as_of.isoformat() if item.as_of else None,
-                "claim_text": item.claim_text,
+                "claim_text": _excerpt(item.claim_text),
                 "document_title": item.document_title,
                 "source_type": item.source_type.value,
                 "source_name": item.source_name,

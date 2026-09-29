@@ -140,8 +140,28 @@ class OpenRouterJSONClient:
             else:
                 text = str(content)
             payload = _parse_json_object(text)
-        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-            raise ValueError("LLM did not return valid JSON") from exc
+        except (KeyError, IndexError, TypeError, AttributeError, json.JSONDecodeError) as exc:
+            body = response_body if isinstance(response_body, dict) else {}
+            choices = body.get("choices")
+            choice = choices[0] if isinstance(choices, list) and choices \
+                and isinstance(choices[0], dict) else {}
+            finish_reason = choice.get("finish_reason")
+            # OpenRouter can return a provider error (e.g. context_length_exceeded)
+            # with HTTP 200 and an "error" body instead of choices.
+            error = body.get("error")
+            logger.error(
+                "LLM response unusable: stage=%s model=%s finish_reason=%s error=%r "
+                "body_preview=%r",
+                stage or "-", self.config.model, finish_reason, error,
+                json.dumps(response_body, default=str)[:1000],
+            )
+            if isinstance(error, dict):
+                raise ValueError(
+                    f"LLM provider error: {error.get('message')} "
+                    f"({(error.get('metadata') or {}).get('provider_code') or error.get('code')})"
+                ) from exc
+            raise ValueError(
+                f"LLM did not return valid JSON (finish_reason={finish_reason})") from exc
         if not isinstance(payload, dict):
             raise TypeError("LLM JSON must be an object")
 

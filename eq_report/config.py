@@ -109,6 +109,13 @@ class Settings:
     log_level: str = "INFO"
     log_json: bool = False
     provider_timeout_seconds: int = 20
+    # Minimum spacing enforced between consecutive MegadataAPI requests,
+    # regardless of which branch or code path issues them (the three
+    # acquisition branches run concurrently, and the technical appendix calls
+    # the same host separately). Keeps the request rate low and steady rather
+    # than bursty, since a LAN-hosted API fronting licensed Bloomberg data can
+    # read a burst of concurrent calls as abuse.
+    megadata_min_request_interval_seconds: float = 0.5
     # Best-effort live check (see pipeline.freshness_check) that the report's
     # dataset is anchored on the latest publicly reported fiscal period,
     # before analysis or synthesis run. A genuine extra cost per run (one
@@ -168,6 +175,8 @@ class Settings:
             log_level=(_env("LOG_LEVEL", "INFO") or "INFO").upper(),
             log_json=_env_bool("LOG_JSON", False),
             provider_timeout_seconds=_env_int("PROVIDER_TIMEOUT_SECONDS", 20),
+            megadata_min_request_interval_seconds=float(
+                _env("MEGADATA_MIN_REQUEST_INTERVAL_SECONDS", "0.5") or 0.5),
             check_data_freshness=_env_bool("CHECK_DATA_FRESHNESS", False),
             verify_metric_conflicts=_env_bool("VERIFY_METRIC_CONFLICTS", False),
             web_fill_gaps=_env_bool("WEB_FILL_GAPS", False),
@@ -202,7 +211,8 @@ class Settings:
                 deterministic_segments=frozenset(
                     s.strip() for s in (
                         _env("DETERMINISTIC_SEGMENTS",
-                             "company_snapshot,financial_performance,operating_drivers")
+                             "company_snapshot,financial_performance,operating_drivers,"
+                             "market_commentary")
                         or ""
                     ).split(",")
                     if s.strip()

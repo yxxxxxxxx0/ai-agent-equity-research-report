@@ -21,6 +21,7 @@ from ..domain.observation import (
 from ..domain.plan import DataRequest, ResearchPlan, SearchRequest
 from ..errors import ProviderError
 from .base import DocumentsProvider, FundamentalsProvider, MarketDataProvider
+from .rate_limit import megadata_limiter
 
 
 class _MegadataMixin:
@@ -43,6 +44,7 @@ class _MegadataMixin:
         api_key = self.settings.credentials.megadata_api_key
         if api_key and auth is None:
             headers["Authorization"] = f"Bearer {api_key}"
+        megadata_limiter(self.settings.megadata_min_request_interval_seconds).wait()
         try:
             response = requests.get(
                 url, params=params, headers=headers, auth=auth,
@@ -146,6 +148,12 @@ class MegadataDocumentsProvider(_MegadataMixin, DocumentsProvider):
                     }
                 else:
                     params = {"query": req.query}
+                    if req.date_to:
+                        params["date_to"] = req.date_to
+                    if req.top_k is not None:
+                        params["top_k"] = str(req.top_k)
+                    if req.exclude_same_source:
+                        params["exclude_same_source"] = "true"
                 payload, url = await self._get(req.endpoint, params)
                 out.append((req, payload, url))
             except BaseException as exc:
@@ -174,6 +182,12 @@ def _bounded_request(request: DataRequest, plan: ResearchPlan) -> DataRequest:
     if request.endpoint in dated:
         params.setdefault("from_date", (report_date - timedelta(days=dated[request.endpoint])).isoformat())
         params.setdefault("to_date", report_date.isoformat())
+    if request.endpoint == "/api/news/filings-by-form":
+        # "forms" is a required query param on this endpoint (no server-side
+        # default) - without it every call 422s regardless of API health.
+        # Default to the material-event forms filings-by-form was actually
+        # introduced to cover if the model didn't specify its own.
+        params.setdefault("forms", "10-K,10-Q,8-K")
     if request.endpoint == "/api/bbg/supply-chain/data":
         params.setdefault("start_date", (report_date - timedelta(days=730)).isoformat())
         params.setdefault("end_date", report_date.isoformat())

@@ -18,6 +18,15 @@ class ResearchQuestion:
     segment: SegmentName
     priority: int = 2  # 1 = must answer, 3 = nice to have
 
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ResearchQuestion":
+        return cls(
+            question_id=str(payload["question_id"]),
+            text=str(payload["text"]),
+            segment=SegmentName(str(payload["segment"])),
+            priority=int(payload.get("priority", 2)),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "question_id": self.question_id,
@@ -34,6 +43,14 @@ class DocumentRequirement:
     source_type: SourceType
     lookback_days: int = 180
     max_documents: int = 5
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "DocumentRequirement":
+        return cls(
+            source_type=SourceType(str(payload["source_type"])),
+            lookback_days=int(payload.get("lookback_days", 180)),
+            max_documents=int(payload.get("max_documents", 5)),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -52,6 +69,16 @@ class SegmentTask:
     question_ids: tuple[str, ...] = ()
     required_metrics: tuple[str, ...] = ()
     required_analytics: tuple[str, ...] = ()
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "SegmentTask":
+        return cls(
+            segment=SegmentName(str(payload["segment"])),
+            objective=str(payload["objective"]),
+            question_ids=tuple(payload.get("question_ids") or ()),
+            required_metrics=tuple(payload.get("required_metrics") or ()),
+            required_analytics=tuple(payload.get("required_analytics") or ()),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -73,6 +100,16 @@ class DatasetRequirement:
     purpose: str
     priority: int = 2
 
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "DatasetRequirement":
+        return cls(
+            dataset=str(payload["dataset"]),
+            fields=tuple(payload.get("fields") or ()),
+            endpoints=tuple(payload.get("endpoints") or ()),
+            purpose=str(payload.get("purpose", "")),
+            priority=int(payload.get("priority", 2)),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "dataset": self.dataset,
@@ -91,6 +128,15 @@ class ExhibitRequirement:
     analytical_question: str
     metrics: tuple[str, ...]
     comparator: str
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ExhibitRequirement":
+        return cls(
+            title=str(payload["title"]),
+            analytical_question=str(payload.get("analytical_question", "")),
+            metrics=tuple(payload.get("metrics") or ()),
+            comparator=str(payload.get("comparator", "")),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -111,6 +157,16 @@ class DataRequest:
     params: dict[str, str]
     purpose: str
 
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "DataRequest":
+        return cls(
+            request_id=str(payload["request_id"]),
+            branch=str(payload["branch"]),
+            endpoint=str(payload["endpoint"]),
+            params=dict(payload.get("params") or {}),
+            purpose=str(payload.get("purpose", "")),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "request_id": self.request_id,
@@ -123,12 +179,35 @@ class DataRequest:
 
 @dataclass(frozen=True, slots=True)
 class SearchRequest:
-    """One evidence search the documents branch should execute."""
+    """One evidence search the documents branch should execute.
+
+    ``date_to``, ``top_k`` and ``exclude_same_source`` map directly onto
+    ``/api/vector-search/search``'s own query parameters (its OpenAPI schema
+    supports date bounding, a result count and de-duplication by source
+    natively). ``None``/default values leave that parameter unset so
+    ``/api/news/data`` searches, which take their own date params, are
+    unaffected.
+    """
 
     request_id: str
     query: str
     endpoint: str = "/api/vector-search/search"
     purpose: str = ""
+    date_to: str | None = None
+    top_k: int | None = None
+    exclude_same_source: bool = False
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "SearchRequest":
+        return cls(
+            request_id=str(payload["request_id"]),
+            query=str(payload["query"]),
+            endpoint=str(payload.get("endpoint") or "/api/vector-search/search"),
+            purpose=str(payload.get("purpose", "")),
+            date_to=payload.get("date_to"),
+            top_k=payload.get("top_k"),
+            exclude_same_source=bool(payload.get("exclude_same_source", False)),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -136,6 +215,9 @@ class SearchRequest:
             "query": self.query,
             "endpoint": self.endpoint,
             "purpose": self.purpose,
+            "date_to": self.date_to,
+            "top_k": self.top_k,
+            "exclude_same_source": self.exclude_same_source,
         }
 
 
@@ -168,6 +250,48 @@ class ResearchPlan:
     planner_model: str | None = None
     data_requests: tuple[DataRequest, ...] = ()
     search_requests: tuple[SearchRequest, ...] = ()
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ResearchPlan":
+        """Rebuild a plan from its ``to_dict``/``01_plan.json`` shape.
+
+        Lets a later stage (or a full pipeline re-run against the same
+        Evidence Store rows) resume without re-invoking the Research
+        Planner: every downstream stage only ever reads the plan through
+        this object, never through the planner call that produced it.
+        """
+        return cls(
+            request=ResearchRequest.from_dict(payload["request"]),
+            company=str(payload["company"]),
+            ticker=payload.get("ticker"),
+            peers=tuple(payload.get("peers") or ()),
+            questions=tuple(
+                ResearchQuestion.from_dict(q) for q in payload.get("questions") or ()),
+            required_market_metrics=tuple(payload.get("required_market_metrics") or ()),
+            required_fundamental_metrics=tuple(
+                payload.get("required_fundamental_metrics") or ()),
+            required_documents=tuple(
+                DocumentRequirement.from_dict(d) for d in payload.get("required_documents") or ()),
+            sections=tuple(ReportSection(str(s)) for s in payload.get("sections") or ()),
+            required_analytics=tuple(payload.get("required_analytics") or ()),
+            segment_tasks=tuple(
+                SegmentTask.from_dict(t) for t in payload.get("segment_tasks") or ()),
+            source_priorities=tuple(
+                SourceType(str(s)) for s in payload.get("source_priorities") or ()),
+            notes=tuple(payload.get("notes") or ()),
+            exchange=payload.get("exchange"),
+            benchmark=payload.get("benchmark"),
+            dataset_requirements=tuple(
+                DatasetRequirement.from_dict(d) for d in payload.get("dataset_requirements") or ()),
+            report_outline=tuple(payload.get("report_outline") or ()),
+            exhibit_requirements=tuple(
+                ExhibitRequirement.from_dict(e) for e in payload.get("exhibit_requirements") or ()),
+            planner_model=payload.get("planner_model"),
+            data_requests=tuple(
+                DataRequest.from_dict(r) for r in payload.get("data_requests") or ()),
+            search_requests=tuple(
+                SearchRequest.from_dict(r) for r in payload.get("search_requests") or ()),
+        )
 
     def questions_for(self, segment: SegmentName) -> tuple[ResearchQuestion, ...]:
         return tuple(q for q in self.questions if q.segment is segment)

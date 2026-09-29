@@ -26,6 +26,7 @@ import contextvars
 import datetime as dt
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -75,6 +76,9 @@ from eq_report.logging_setup import configure_logging  # noqa: E402
 from eq_report.llm import usage as usage_module  # noqa: E402
 from eq_report.pipeline import run_tracker as run_tracker_module  # noqa: E402
 from eq_report.pipeline.orchestrator import generate_report_sync  # noqa: E402
+from eq_report.pipeline.run_tracker import RUN_ID_PATTERN  # noqa: E402
+
+TICKER_PATTERN = re.compile(r"[A-Z0-9.\-]{1,10}")
 
 app = Flask(__name__)
 
@@ -194,16 +198,27 @@ usage_module.UsageTracker.record = _tracked_record
 configure_logging("INFO")  # lock in handlers now so per-run calls don't reset them
 
 
-def _run_job(job_id: str, ticker: str, report_date: dt.date) -> None:
+def _run_job(
+    job_id: str, ticker: str | None, report_date: dt.date | None,
+    resume_from: str | None = None,
+) -> None:
     _THREAD_JOB[threading.get_ident()] = job_id
     _JOB_CTX.set(job_id)
     with _JOBS_LOCK:
         JOBS[job_id]["status"] = "running"
         JOBS[job_id]["started_at"] = time.time()
     try:
-        research_request = ResearchRequest(company=ticker, ticker=ticker, report_date=report_date)
         settings = Settings.from_env(output_dir=REPO_ROOT / "output_webui")
-        result = generate_report_sync(research_request, settings)
+        if resume_from:
+            # Re-runs analysis/synthesis/QA/rendering against that run's
+            # already-persisted plan and Evidence Store rows - no planning
+            # or acquisition call is repeated. See
+            # eq_report.pipeline.orchestrator.generate_report's docstring.
+            result = generate_report_sync(None, settings, resume_from=resume_from)
+        else:
+            research_request = ResearchRequest(
+                company=ticker, ticker=ticker, report_date=report_date)
+            result = generate_report_sync(research_request, settings)
         usage = (result.run.llm_usage or {}) if result.run else {}
         qa = result.qa_result
         run_dir = Path(result.report_json_path).parent if result.report_json_path else None
@@ -240,9 +255,13 @@ def _run_job(job_id: str, ticker: str, report_date: dt.date) -> None:
                 for stage in (result.run.stages if result.run else [])
                 if stage.duration_ms is not None
             }
+            resumed_ticker = (
+                (result.run.request or {}).get("ticker") if (resume_from and result.run) else None
+            )
             JOBS[job_id].update(
                 status="done" if (result.succeeded and result.compact_pdf_path) else "failed",
                 report_run_id=result.report_run_id,
+                **({"ticker": f"{resumed_ticker} (resumed)"} if resumed_ticker else {}),
                 run_status=result.status.value,
                 compact_pdf=str(result.compact_pdf_path) if result.compact_pdf_path else None,
                 pdf=str(result.pdf_path) if result.pdf_path else None,
@@ -277,12 +296,15 @@ def _run_job(job_id: str, ticker: str, report_date: dt.date) -> None:
         _THREAD_JOB.pop(threading.get_ident(), None)
 
 
-def _start_job(ticker: str, report_date: dt.date) -> str:
+def _start_job(
+    ticker: str | None, report_date: dt.date | None, *, resume_from: str | None = None,
+) -> str:
     job_id = uuid.uuid4().hex[:8]
     with _JOBS_LOCK:
         JOBS[job_id] = {
-            "ticker": ticker,
-            "report_date": report_date.isoformat(),
+            "ticker": ticker or (f"Resuming {resume_from}" if resume_from else ""),
+            "report_date": report_date.isoformat() if report_date else None,
+            "resume_from": resume_from,
             "status": "queued",
             "active_stages": [],
             "completed_stages": [],
@@ -290,7 +312,8 @@ def _start_job(ticker: str, report_date: dt.date) -> str:
             "stage_completed_at": {},
             "stage_durations_ms": {},
         }
-    threading.Thread(target=_run_job, args=(job_id, ticker, report_date), daemon=True).start()
+    threading.Thread(
+        target=_run_job, args=(job_id, ticker, report_date, resume_from), daemon=True).start()
     return job_id
 
 
@@ -301,9 +324,15 @@ def index():
 
 @app.route("/generate", methods=["POST"])
 def generate():
+    resume_from = request.form.get("resume_from", "").strip()
+    if resume_from:
+        if not RUN_ID_PATTERN.fullmatch(resume_from):
+            return redirect(url_for("index"))
+        job_id = _start_job(None, None, resume_from=resume_from)
+        return redirect(url_for("job_page", job_id=job_id))
     ticker = request.form.get("ticker", "").strip().upper()
     date_str = request.form.get("report_date", "").strip()
-    if not ticker:
+    if not TICKER_PATTERN.fullmatch(ticker):
         return redirect(url_for("index"))
     try:
         report_date = dt.date.fromisoformat(date_str) if date_str else dt.date.today()
@@ -316,9 +345,16 @@ def generate():
 @app.route("/api/generate", methods=["POST"])
 def api_generate():
     payload = request.get_json(silent=True) or {}
+    resume_from = str(payload.get("resume_from", "")).strip()
+    if resume_from:
+        if not RUN_ID_PATTERN.fullmatch(resume_from):
+            return jsonify({"error": "resume_from must be a run id like "
+                                     "run_20260929T060809_f9cebb"}), 400
+        job_id = _start_job(None, None, resume_from=resume_from)
+        return jsonify({"job_id": job_id})
     ticker = str(payload.get("ticker", "")).strip().upper()
-    if not ticker:
-        return jsonify({"error": "ticker is required"}), 400
+    if not TICKER_PATTERN.fullmatch(ticker):
+        return jsonify({"error": "a valid ticker is required"}), 400
     date_str = str(payload.get("report_date", "")).strip()
     try:
         report_date = dt.date.fromisoformat(date_str) if date_str else dt.date.today()
@@ -455,6 +491,11 @@ APP_STYLE = """
     .toggle-group { display: flex; gap: 8px; }
 
     .example-hint { color: var(--faint); font-size: 12.5px; margin-top: 12px; }
+    .resume-toggle { margin: 10px 0 0; font-size: 12.5px; }
+    .resume-toggle a { color: var(--blue); text-decoration: none; }
+    .resume-toggle a:hover { text-decoration: underline; }
+    .resume-row.ticker-row { margin-top: 10px; }
+    #resume-hint.example-hint { margin-top: 8px; }
 
     /* Step tracker */
     .steps { position: relative; }
@@ -731,6 +772,17 @@ APP_HTML = """
             </button>
           </div>
           <p class="example-hint">e.g. AAPL, MSFT, NVDA, TSLA</p>
+          <p class="resume-toggle"><a href="#" onclick="toggleResumeRow(event)" id="resume-link">Resume a previous run instead</a></p>
+          <div class="ticker-row resume-row" id="resume-row" style="display:none;">
+            <div class="ticker-field">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"></polyline><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path></svg>
+              <input id="resume-run-id" placeholder="run_20260929T060809_f9cebb" autocomplete="off">
+            </div>
+            <button id="resume-btn" class="btn btn-primary" onclick="resumeReport()">
+              Resume
+            </button>
+          </div>
+          <p class="example-hint resume-row" id="resume-hint" style="display:none;">Re-runs analysis, synthesis, QA and rendering for an existing run_id, reusing its already-fetched evidence - no re-planning or re-acquisition.</p>
         </div>
 
         <div class="card">
@@ -990,6 +1042,45 @@ APP_HTML = """
       }
     }
 
+    function toggleResumeRow(evt) {
+      evt.preventDefault();
+      const row = document.getElementById("resume-row");
+      const hint = document.getElementById("resume-hint");
+      const shown = row.style.display !== "none";
+      row.style.display = shown ? "none" : "flex";
+      hint.style.display = shown ? "none" : "block";
+      document.getElementById("resume-link").textContent =
+        shown ? "Resume a previous run instead" : "Start a new report instead";
+    }
+
+    async function resumeReport() {
+      const runId = document.getElementById("resume-run-id").value.trim();
+      if (!runId) return;
+      const btn = document.getElementById("resume-btn");
+      btn.disabled = true;
+      stepStartedAt = {};
+      try {
+        const res = await fetch("/api/generate", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({resume_from: runId}),
+        });
+        const body = await res.json();
+        if (!res.ok) {
+          alert(body.error || "Could not start the resume run.");
+          btn.disabled = false;
+          return;
+        }
+        jobId = body.job_id;
+        history.replaceState(null, "", `/job/${jobId}`);
+        renderSteps(null);
+        renderViewer({status: "running", ticker: `Resuming ${runId}`});
+        poll();
+      } catch (err) {
+        alert("Could not reach the server: " + err);
+        btn.disabled = false;
+      }
+    }
+
     async function generateReports() {
       const ticker = document.getElementById("ticker").value.trim().toUpperCase();
       if (!ticker) return;
@@ -1028,7 +1119,8 @@ APP_HTML = """
       renderViewer(job);
       updateTelemetry(job);
       const btn = document.getElementById("generate-btn");
-      if (job.ticker) document.getElementById("ticker").value = job.ticker;
+      if (job.ticker && !job.resume_from) document.getElementById("ticker").value = job.ticker;
+      if (job.resume_from) document.getElementById("resume-run-id").value = job.resume_from;
 
       if (job.status === "done" || job.status === "failed") {
         btn.disabled = false;

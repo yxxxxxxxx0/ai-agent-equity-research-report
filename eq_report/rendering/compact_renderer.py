@@ -8,7 +8,6 @@ same calculations and chart captions as the full report.
 from __future__ import annotations
 
 import argparse
-import re
 from pathlib import Path
 
 from reportlab.lib import colors
@@ -21,6 +20,7 @@ from ..config import ProviderCredentials, Settings
 from ..domain.enums import ReportSection
 from ..domain.report import MetricTable, ReportDraft
 from ..logging_setup import get_logger
+from ..synthesis.terminology import claim_fingerprint
 from .json_loader import load_report_json
 from .pdf_renderer import ACCENT, ACCENT_LINE, ACCENT_SOFT, HAIRLINE, INK, MUTED, ZEBRA
 from .technical_appendix import build_technical_appendix_pdf, merge_technical_appendix
@@ -34,7 +34,18 @@ logger = get_logger("rendering.compact")
 PAPER = colors.white
 
 
-def _lines(text: str, width: float, font: str = "Helvetica", size: float = 7.2) -> list[str]:
+#: One body size and leading for every block on the page, so no box reads
+#: smaller than its neighbour; section bars and the masthead stay distinct.
+BODY_SIZE = 7.0
+BODY_LEADING = 8.8
+#: Card padding: first baseline sits 13pt under the card top (see panel()),
+#: so a card needs this much beyond its lines to keep descenders inside.
+_CARD_PAD = 10.0
+_BULLET_INDENT = 8.0
+_ITEM_GAP = 2.0
+
+
+def _lines(text: str, width: float, font: str = "Helvetica", size: float = BODY_SIZE) -> list[str]:
     return simpleSplit(text, font, size, width)
 
 
@@ -53,18 +64,13 @@ def _paragraph(c: Canvas, x: float, y: float, width: float, text: str, *,
     return y
 
 
-def _short(text: str, max_words: int = 34) -> str:
-    """Keep a report statement readable in a compact bullet layout."""
-    text = " ".join(text.split())
-    # Keep source markers even when the prose has to be shortened; otherwise
-    # the compact layout would silently sever a claim from its provenance.
-    match = re.search(r"((?:\s*\[\d+\])+)$", text)
-    refs = match.group(1).replace(" ", "") if match else ""
-    body = text[:match.start()].rstrip() if match else text
-    words = body.split()
-    if len(words) <= max_words:
-        return " ".join(words) + refs
-    return " ".join(words[:max_words]).rstrip(".,;:") + "..." + refs
+def _overlaps(left: frozenset[str], right: frozenset[str]) -> bool:
+    """Near-duplicate test for the compact page: similar overall, or one
+    point largely contained in another (a short restatement of a long one)."""
+    if not left or not right:
+        return False
+    shared = len(left & right)
+    return shared / len(left | right) >= 0.5 or shared / min(len(left), len(right)) >= 0.7
 
 
 def _cited_text(text: str, refs: tuple[int, ...]) -> str:
@@ -72,9 +78,8 @@ def _cited_text(text: str, refs: tuple[int, ...]) -> str:
     return text + (" " + "".join(f"[{ref}]" for ref in refs) if refs else "")
 
 
-def _bullets(c: Canvas, x: float, y: float, width: float, texts: list[str], *,
-             max_words: int = 34, size: float = 6.35, max_lines: int = 2) -> float:
-    """Render concise evidence-led points without long narrative blocks."""
+def _bullets(c: Canvas, x: float, y: float, width: float, texts: list[str]) -> float:
+    """Render each point in full at the body size; the card is sized to fit."""
     for text in texts:
         if not text:
             continue
@@ -82,9 +87,9 @@ def _bullets(c: Canvas, x: float, y: float, width: float, texts: list[str], *,
         # Align the marker to the first line's baseline instead of to the
         # preceding block's leading; this keeps every bullet visually level.
         c.circle(x + 2, y + 1.1, 1.1, fill=1, stroke=0)
-        y = _paragraph(c, x + 8, y, width - 8, _short(text, max_words),
-                       size=size, leading=size + 1.25, max_lines=max_lines)
-        y -= 2
+        y = _paragraph(c, x + _BULLET_INDENT, y, width - _BULLET_INDENT, " ".join(text.split()),
+                       size=BODY_SIZE, leading=BODY_LEADING)
+        y -= _ITEM_GAP
     return y
 
 
@@ -115,39 +120,36 @@ def _card(c: Canvas, x: float, y_top: float, width: float, height: float) -> Non
     c.rect(x, y_top - height, width, height, fill=1, stroke=1)
 
 
-def _bullet_block_height(
-    texts: list[str], *, size: float = 6.35, max_lines: int = 2, extra: float = 12.0,
-) -> float:
-    """Worst-case height a `_bullets` call can take, for drawing its card first.
-
-    `_bullets` never exceeds `max_lines` per item (it truncates with an
-    ellipsis), so this upper bound is exact enough to size a background card
-    that always fully contains the text drawn on top of it afterward.
-    Returns exactly 0 when there is nothing to draw, so a caller can use it
-    directly to decide whether the block exists at all.
-    """
-    n = sum(1 for t in texts if t)
-    if n == 0:
+def _bullet_lines_height(texts: list[str], width: float) -> float:
+    """Exact vertical space `_bullets` uses at this width (0 if nothing to draw)."""
+    items = [t for t in texts if t]
+    if not items:
         return 0.0
-    return n * (max_lines * (size + 1.25) + 2) + extra
+    lines = sum(len(_lines(" ".join(t.split()), width - _BULLET_INDENT)) for t in items)
+    return lines * BODY_LEADING + len(items) * _ITEM_GAP
+
+
+def _bullet_block_height(texts: list[str], width: float) -> float:
+    """Card height that contains every wrapped line of `_bullets(texts)`."""
+    body = _bullet_lines_height(texts, width)
+    return body + _CARD_PAD if body else 0.0
+
+
+_ROW_H = 11.0
 
 
 def _table_block_height(table: MetricTable | None) -> float:
     """Exact height `_table` descends by, for sizing its card ahead of time."""
     if table is None or not table.columns:
         return 0.0
-    return 10 + 10 + min(len(table.rows), 4) * 10 + 4
+    return 11 + _ROW_H + min(len(table.rows), 4) * _ROW_H + 4
 
 
-def _paragraph_block_height(
-    text: str, width: float, *, size: float = 7.15, leading: float = 8.6,
-    max_lines: int = 15,
-) -> float:
-    """Worst-case height a `_paragraph` call can take, for sizing its card."""
+def _paragraph_block_height(text: str, width: float) -> float:
+    """Card height that contains every wrapped line of `_paragraph(text)`."""
     if not text or not text.strip():
         return 0.0
-    lines = min(len(_lines(text, width, "Helvetica", size)), max_lines)
-    return lines * leading + 4
+    return len(_lines(text, width)) * BODY_LEADING + _CARD_PAD
 
 
 def _key_data(c: Canvas, draft: ReportDraft, y: float) -> float:
@@ -195,9 +197,9 @@ def _table(c: Canvas, x: float, y: float, width: float, table: MetricTable) -> f
     if not columns:
         return y
     c.setFillColor(ACCENT)
-    c.setFont("Helvetica-Bold", 6.7)
+    c.setFont("Helvetica-Bold", BODY_SIZE)
     c.drawString(x, y, table.title)
-    y -= 10
+    y -= 11
     if len(columns) == 4:
         col_widths = (width * 0.40, width * 0.20, width * 0.20, width * 0.20)
     elif len(columns) == 3:
@@ -208,28 +210,28 @@ def _table(c: Canvas, x: float, y: float, width: float, table: MetricTable) -> f
     for col_width in col_widths[:-1]:
         col_starts.append(col_starts[-1] + col_width)
     c.setFillColor(ACCENT)
-    c.rect(x, y - 10, width, 10, fill=1, stroke=0)
+    c.rect(x, y - _ROW_H, width, _ROW_H, fill=1, stroke=0)
     c.setFillColor(colors.white)
-    c.setFont("Helvetica-Bold", 5.7)
+    c.setFont("Helvetica-Bold", BODY_SIZE)
     for index, column in enumerate(columns):
-        c.drawString(col_starts[index] + 2, y - 7,
-                     _fit_cell(column, col_widths[index] - 4, font="Helvetica-Bold", size=5.7))
-    y -= 10
+        c.drawString(col_starts[index] + 2, y - 8,
+                     _fit_cell(column, col_widths[index] - 4, font="Helvetica-Bold", size=BODY_SIZE))
+    y -= _ROW_H
     for row_index, row in enumerate(table.rows[:4]):
         if row.emphasis:
             c.setFillColor(ACCENT_SOFT)
-            c.rect(x, y - 10, width, 10, fill=1, stroke=0)
+            c.rect(x, y - _ROW_H, width, _ROW_H, fill=1, stroke=0)
         elif row_index % 2 == 0:
             c.setFillColor(ZEBRA)
-            c.rect(x, y - 10, width, 10, fill=1, stroke=0)
+            c.rect(x, y - _ROW_H, width, _ROW_H, fill=1, stroke=0)
         c.setFillColor(ACCENT if row.emphasis else INK)
-        c.setFont("Helvetica-Bold" if row.emphasis else "Helvetica", 5.8)
+        font = "Helvetica-Bold" if row.emphasis else "Helvetica"
+        c.setFont(font, BODY_SIZE)
         values = (row.label, *row.cells)[:len(columns)]
         for index, value in enumerate(values):
-            c.drawString(col_starts[index] + 2, y - 7,
-                         _fit_cell(value, col_widths[index] - 4,
-                                   font="Helvetica-Bold" if row.emphasis else "Helvetica"))
-        y -= 10
+            c.drawString(col_starts[index] + 2, y - 8,
+                         _fit_cell(value, col_widths[index] - 4, font=font, size=BODY_SIZE))
+        y -= _ROW_H
         if row_index < min(len(table.rows), 4) - 1:
             c.setStrokeColor(HAIRLINE)
             c.setLineWidth(0.4)
@@ -358,42 +360,69 @@ def _render_brief(draft: ReportDraft, output_pdf: Path) -> None:
     recent_texts = [_cited_text(s.text, s.citation_refs)
                     for s in (recent.statements[:2] if recent else ())]
 
-    used = {
-        t for t in intro_texts + snapshot_texts + competitive_texts + risk_texts
-        + watch_texts + recent_texts if t
-    }
-    candidates = [
-        _cited_text(statement.text, statement.citation_refs)
-        for section in draft.sections for statement in section.statements[2:]
-        if _cited_text(statement.text, statement.citation_refs) not in used
-    ][:5]
+    shown = [
+        t for t in intro_texts + snapshot_texts + metric_notes + competitive_texts
+        + risk_texts + watch_texts + recent_texts + [financial_text] if t
+    ]
+    fingerprints = [claim_fingerprint(t) for t in shown]
+
+    def repeats_something(text: str) -> bool:
+        fp = claim_fingerprint(text)
+        return any(_overlaps(fp, other) for other in fingerprints)
+
+    # Sections with no block of their own (e.g. Valuation) go first, from
+    # their first statement; other sections contribute what their block
+    # did not show. A point that restates one already on the page is skipped.
+    featured = {ReportSection.COMPANY_SNAPSHOT, ReportSection.KEY_TAKEAWAYS,
+                ReportSection.FINANCIALS, ReportSection.OPERATING_DRIVERS,
+                ReportSection.COMPETITIVE_LANDSCAPE, ReportSection.RISKS,
+                ReportSection.WHAT_MATTERS_NEXT, ReportSection.RECENT_DEVELOPMENTS}
+    ordered = [s for s in draft.sections if s.section not in featured] + \
+              [s for s in draft.sections if s.section in featured]
+    candidates: list[str] = []
+    for section in ordered:
+        start = 0 if section.section not in featured else 2
+        for statement in section.statements[start:]:
+            text = _cited_text(statement.text, statement.citation_refs)
+            if repeats_something(text):
+                continue
+            candidates.append(text)
+            fingerprints.append(claim_fingerprint(text))
+    candidates = candidates[:5]
 
     # -- layout: each block reports its own height, 0 meaning "skip me" ----
     y = page_h - 80
 
+    full_inner, col_inner = full_w - 10, col_w - 10
+
     y = draw_full(
-        y, "Company Overview", _bullet_block_height(intro_texts, size=7.1, max_lines=3, extra=14),
-        lambda x, yy, w: _bullets(c, x, yy, w, intro_texts, max_words=70, size=7.1, max_lines=3),
+        y, "Company Overview", _bullet_block_height(intro_texts, full_inner),
+        lambda x, yy, w: _bullets(c, x, yy, w, intro_texts),
     )
     y = draw_full(
-        y, "Investment Snapshot",
-        _bullet_block_height(snapshot_texts, size=6.65, max_lines=2, extra=12),
-        lambda x, yy, w: _bullets(c, x, yy, w, snapshot_texts, max_words=66, size=6.65, max_lines=2),
+        y, "Investment Snapshot", _bullet_block_height(snapshot_texts, full_inner),
+        lambda x, yy, w: _bullets(c, x, yy, w, snapshot_texts),
     )
 
     def draw_financial_metrics(x: float, yy: float, w: float) -> None:
         table_bottom = _table(c, x, yy, w, financial_table) if financial_table else yy
         if metric_notes:
-            _bullets(c, x, table_bottom - 5, w, metric_notes, max_words=28, size=5.85, max_lines=2)
+            _bullets(c, x, table_bottom - 5 if financial_table else table_bottom, w, metric_notes)
 
     def draw_financial_narrative(x: float, yy: float, w: float) -> None:
-        _paragraph(c, x, yy, w, financial_text, size=7.15, leading=8.6, max_lines=15)
+        _paragraph(c, x, yy, w, financial_text, size=BODY_SIZE, leading=BODY_LEADING)
 
-    financial_metrics_h = _table_block_height(financial_table) + (
-        _bullet_block_height(metric_notes, size=5.85, max_lines=2, extra=8) if metric_notes else 0.0
-    )
-    financial_narrative_h = _paragraph_block_height(
-        financial_text, col_w - 10, size=7.15, leading=8.6, max_lines=15)
+    table_h = _table_block_height(financial_table)
+    notes_h = _bullet_lines_height(metric_notes, col_inner)
+    financial_metrics_h = (table_h + (5 if table_h and notes_h else 0) + notes_h + _CARD_PAD
+                           if (table_h or notes_h) else 0.0)
+    financial_narrative_h = _paragraph_block_height(financial_text, col_inner)
+    # A lone survivor renders full width, so size it for that width instead.
+    if not financial_narrative_h and financial_metrics_h:
+        notes_h = _bullet_lines_height(metric_notes, full_inner)
+        financial_metrics_h = table_h + (5 if table_h and notes_h else 0) + notes_h + _CARD_PAD
+    if not financial_metrics_h and financial_narrative_h:
+        financial_narrative_h = _paragraph_block_height(financial_text, full_inner)
     y = draw_pair(
         y, "Key Financial Metrics", financial_metrics_h, draw_financial_metrics,
         "Financial Performance & Operating Drivers", financial_narrative_h, draw_financial_narrative,
@@ -401,20 +430,29 @@ def _render_brief(draft: ReportDraft, output_pdf: Path) -> None:
 
     competitive_risk_texts = competitive_texts + risk_texts
     watch_recent_texts = watch_texts + recent_texts
+    both = bool(competitive_risk_texts) and bool(watch_recent_texts)
+    pair_w = col_inner if both else full_inner
     y = draw_pair(
         y,
         "Competitive Landscape & Business Risk",
-        _bullet_block_height(competitive_risk_texts, size=6.5, max_lines=3, extra=12),
-        lambda x, yy, w: _bullets(c, x, yy, w, competitive_risk_texts, max_words=32, size=6.5, max_lines=3),
+        _bullet_block_height(competitive_risk_texts, pair_w),
+        lambda x, yy, w: _bullets(c, x, yy, w, competitive_risk_texts),
         "What Matters Next & Recent Developments",
-        _bullet_block_height(watch_recent_texts, size=6.5, max_lines=3, extra=12),
-        lambda x, yy, w: _bullets(c, x, yy, w, watch_recent_texts, max_words=34, size=6.5, max_lines=3),
+        _bullet_block_height(watch_recent_texts, pair_w),
+        lambda x, yy, w: _bullets(c, x, yy, w, watch_recent_texts),
     )
 
+    # Fill the remaining page only with points that fit entirely in the box.
+    bottom = 30.0
+    available = y - _BAR_H - bottom
+    fitted: list[str] = []
+    for text in candidates:
+        if _bullet_block_height(fitted + [text], full_inner) > available:
+            break
+        fitted.append(text)
     y = draw_full(
-        y, "Additional Evidence",
-        _bullet_block_height(candidates, size=6.3, max_lines=2, extra=14),
-        lambda x, yy, w: _bullets(c, x, yy, w, candidates, max_words=62, size=6.3, max_lines=2),
+        y, "Additional Evidence", _bullet_block_height(fitted, full_inner),
+        lambda x, yy, w: _bullets(c, x, yy, w, fitted),
     )
 
     c.setFillColor(MUTED)

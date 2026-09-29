@@ -29,6 +29,7 @@ from ..evidence.reader import EvidenceReader
 from ..llm.client import OpenRouterJSONClient
 from ..llm.usage import UsageTracker
 from ..logging_setup import get_logger, log_event
+from ..llm.verify import is_true
 
 logger = get_logger("qa.web_claim_auditor")
 
@@ -86,7 +87,7 @@ async def reverify_web_claims(
             return WebClaimAuditResult()
         client = OpenRouterJSONClient(model_config, tracker=tracker)
 
-    schema = {"verified": "true or false", "note": "one short sentence on what you found"}
+    schema = {"verified": "JSON boolean true or false (not a string)", "note": "one short sentence on what you found"}
     rejected: list[str] = []
     for item in web_items:
         prompt = (
@@ -103,7 +104,7 @@ async def reverify_web_claims(
                       evidence_id=item.evidence_id, error=f"{type(exc).__name__}: {exc}")
             continue
         payload = response.payload if isinstance(response.payload, dict) else {}
-        if payload.get("verified"):
+        if is_true(payload.get("verified")):
             continue
         updated = replace(
             item, status=EvidenceStatus.REJECTED,

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -30,7 +31,7 @@ from ..agents.runner import run_segment_agents
 from ..analytics.engine import AnalyticsEngine
 from ..config import ModelConfig, Settings
 from ..domain.analytics import AnalyticsBundle
-from ..domain.enums import ProviderStatus, RunStatus
+from ..domain.enums import EvidenceCategory, ProviderStatus, RunStatus
 from ..domain.plan import ResearchPlan
 from ..domain.qa import QAResult
 from ..domain.report import ReportDraft
@@ -39,13 +40,14 @@ from ..domain.run import ReportRun
 from ..domain.segment import SegmentResult
 from ..errors import PipelineError
 from ..evidence.reader import EvidenceReader
-from ..evidence.store import EvidenceStore
+from ..evidence.store import EvidenceQuery, EvidenceStore
+from ..normalisation.reconciliation import revalidate_qualitative
 from ..llm.usage import UsageTracker
 from ..logging_setup import configure_logging, get_logger, log_event
 from ..normalisation.normalizer import NormalisationResult, Normalizer
-from ..planning.research_planner import ResearchPlanner
+from ..planning.research_planner import ResearchPlanner, _clean_company_name
 from ..qa.engine import QAEngine
-from ..qa.repair import DraftRepairer
+from ..qa.repair import DraftRepairer, tidy_draft
 from ..rendering.compact_renderer import render_compact_report
 from ..rendering.json_writer import write_json, write_report_json, write_run_manifest
 from ..rendering.pdf_renderer import PdfReportRenderer
@@ -55,7 +57,7 @@ from ..rendering.technical_appendix import (
 )
 from ..synthesis.llm_synthesizer import LLMSynthesizer
 from .freshness_check import FreshnessResult, check_freshness
-from .run_tracker import RunTracker, new_run_id
+from .run_tracker import RUN_ID_PATTERN, RunTracker, new_run_id
 from .web_gap_fill import WebGapFillResult, fill_evidence_gaps
 
 logger = get_logger("pipeline")
@@ -93,15 +95,28 @@ class ReportResult:
 
 
 async def generate_report(
-    request: ResearchRequest,
+    request: ResearchRequest | None = None,
     settings: Settings | None = None,
     *,
     store: EvidenceStore | None = None,
+    resume_from: str | None = None,
 ) -> ReportResult:
     """Run the full pipeline for one research request.
 
     ``store`` may be supplied by tests to use an in-memory Evidence Store; the
     default opens the configured SQLite file.
+
+    ``resume_from``: an existing ``report_run_id`` produced by an earlier,
+    successful call to this function. When set, ``request`` is ignored -
+    planning, acquisition, normalisation, the freshness check and web
+    gap-fill are all skipped, and the pipeline resumes directly against that
+    run's plan (reloaded from its saved ``01_plan.json``) and its
+    already-persisted Evidence Store rows. This is for iterating on
+    synthesis/QA/rendering code without re-paying for the API/LLM calls the
+    earlier stages already made; it writes its outputs into that same run's
+    directory, so ``04_analytics.json`` onward and the run manifest are
+    replaced by the new attempt while the plan/acquisition/normalisation
+    snapshots are untouched.
     """
     settings = settings or Settings.from_env()
     settings.ensure_dirs()
@@ -111,127 +126,188 @@ async def generate_report(
         raise RuntimeError(
             "LLM writing is required. Configure EQR_MODEL_API_KEY before generating a report.")
 
-    report_run_id = new_run_id()
-    tracker = RunTracker(report_run_id, request.to_dict())
-    usage_tracker = UsageTracker()
-    run_dir = settings.run_dir(report_run_id)
+    carried_metadata: dict[str, Any] = {}
+    if resume_from:
+        # The id becomes a path component - accept only the shape new_run_id() makes.
+        if not RUN_ID_PATTERN.fullmatch(resume_from):
+            raise ValueError(f"not a valid report_run_id: {resume_from!r}")
+        report_run_id = resume_from
+        run_dir = settings.run_dir(report_run_id)
+        plan_path = run_dir / "01_plan.json"
+        if not plan_path.exists():
+            raise RuntimeError(
+                f"cannot resume run {resume_from!r}: no saved plan at {plan_path}")
+        plan = ResearchPlan.from_dict(json.loads(plan_path.read_text(encoding="utf-8")))
+        # Plans saved before the planner cleaned its company name still carry
+        # the model's "(AAPL; identity to be verified)" note.
+        plan = replace(plan, company=_clean_company_name(plan.company))
+        request = plan.request
+        # Disclosures produced by the skipped stages (page-1 freshness notice,
+        # web-research note) must survive the resume.
+        previous_draft = run_dir / "06_report_draft_initial.json"
+        if previous_draft.exists():
+            previous = json.loads(previous_draft.read_text(encoding="utf-8"))
+            carried_metadata = {
+                key: value for key, value in (previous.get("metadata") or {}).items()
+                if key in {"freshness_check", "web_gap_fill"}
+            }
+        (run_dir / "validation_failure.json").unlink(missing_ok=True)
+    else:
+        if request is None:
+            raise RuntimeError("request is required unless resume_from is set")
+        report_run_id = new_run_id()
+        run_dir = settings.run_dir(report_run_id)
 
     owns_store = store is None
     store = store or EvidenceStore(settings.database_path)
 
+    tracker = RunTracker(report_run_id, request.to_dict())
+    usage_tracker = UsageTracker()
+
     log_event(logger, logging.INFO, "report run started",
               company=request.company, ticker=request.ticker,
               sections=[s.value for s in request.sections],
+              resume_from=resume_from,
               settings=settings.describe())
 
     try:
-        # 1. Planning ----------------------------------------------------
-        with tracker.stage("planning"):
-            # Planning is the only stage given its own reasoning-effort
-            # setting (see Settings.planning_reasoning_effort): the one call
-            # that shapes every downstream stage's scope. This is a copy of
-            # settings.model with only ``reasoning_effort`` changed - every
-            # other stage below still receives settings.model unmodified.
-            planning_model = (
-                replace(settings.model, reasoning_effort=settings.planning_reasoning_effort)
-                if settings.planning_reasoning_effort else settings.model
-            )
-            plan = await ResearchPlanner(planning_model, tracker=usage_tracker).plan(request)
-            tracker.set_plan(plan.to_dict())
-            for note in plan.notes:
-                tracker.warn(note)
-            write_json(run_dir / "01_plan.json", plan.to_dict())
+        if resume_from:
+            # Skip stages 1-4.6 entirely: the plan came from disk above, and
+            # the Evidence Store already holds this run_id's rows from the
+            # original run - see the docstring.
+            with tracker.stage("resume_from_evidence_store"):
+                reader = EvidenceReader(
+                    store=store, report_run_id=report_run_id,
+                    ticker=plan.ticker, company=Normalizer(report_run_id, plan).company,
+                )
+                evidence_count = store.count(report_run_id)
+                if evidence_count == 0:
+                    raise RuntimeError(
+                        f"cannot resume run {resume_from!r}: the Evidence Store has no "
+                        "rows for it (it may have been cleared since that run)")
+                # Rows keep whatever status the code of their day assigned;
+                # re-apply today's qualitative-validation rule so a resume
+                # sees the same evidence a fresh run would.
+                revalidated = revalidate_qualitative(store.query(EvidenceQuery(
+                    report_run_id=report_run_id, category=EvidenceCategory.DOCUMENT)))
+                if revalidated:
+                    store.replace(revalidated)
+                tracker.set_plan(plan.to_dict())
+                tracker.warn(
+                    f"Resumed from run {resume_from}: reused its plan and "
+                    f"{evidence_count} Evidence Store row(s); planning, acquisition, "
+                    "normalisation, the freshness check and web gap-fill were skipped."
+                )
+            freshness = FreshnessResult(checked=False)
+            web_gap_fill_result = WebGapFillResult(attempted=False)
+        else:
+            # 1. Planning ----------------------------------------------------
+            with tracker.stage("planning"):
+                # Planning is the only stage given its own reasoning-effort
+                # setting (see Settings.planning_reasoning_effort): the one call
+                # that shapes every downstream stage's scope. This is a copy of
+                # settings.model with only ``reasoning_effort`` changed - every
+                # other stage below still receives settings.model unmodified.
+                planning_model = (
+                    replace(settings.model, reasoning_effort=settings.planning_reasoning_effort)
+                    if settings.planning_reasoning_effort else settings.model
+                )
+                plan = await ResearchPlanner(planning_model, tracker=usage_tracker).plan(request)
+                tracker.set_plan(plan.to_dict())
+                for note in plan.notes:
+                    tracker.warn(note)
+                write_json(run_dir / "01_plan.json", plan.to_dict())
 
-        # 2. Parallel acquisition ---------------------------------------
-        with tracker.stage("acquisition"):
-            market_service, fundamentals_service, documents_service = build_services(
-                settings, usage_tracker)
-            acquisition = await acquire_all(
-                plan, market_service, fundamentals_service, documents_service)
-            tracker.set_source_status(acquisition.to_dict())
-            tracker.errors(acquisition.errors)
-            _warn_on_dead_branches(tracker, acquisition)
-            write_json(run_dir / "02_acquisition.json", {"branches": acquisition.to_dict()})
+            # 2. Parallel acquisition ---------------------------------------
+            with tracker.stage("acquisition"):
+                market_service, fundamentals_service, documents_service = build_services(
+                    settings, usage_tracker)
+                acquisition = await acquire_all(
+                    plan, market_service, fundamentals_service, documents_service)
+                tracker.set_source_status(acquisition.to_dict())
+                tracker.errors(acquisition.errors)
+                _warn_on_dead_branches(tracker, acquisition)
+                write_json(run_dir / "02_acquisition.json", {"branches": acquisition.to_dict()})
 
-        # 3. Normalisation -----------------------------------------------
-        with tracker.stage("normalisation"):
-            normalised = await Normalizer(
-                report_run_id, plan, settings.model, tracker=usage_tracker
-            ).normalize(
-                acquisition.market_data.observations,
-                acquisition.fundamentals.observations,
-                acquisition.documents.passages,
-                document_observations=acquisition.documents.observations,
-            )
-            _record_rejections(tracker, normalised)
-            write_json(run_dir / "03_normalisation.json", {
-                **normalised.to_dict(),
-                "evidence": [item.to_dict() for item in normalised.evidence],
-            })
+            # 3. Normalisation -----------------------------------------------
+            with tracker.stage("normalisation"):
+                normalised = await Normalizer(
+                    report_run_id, plan, settings.model, tracker=usage_tracker
+                ).normalize(
+                    acquisition.market_data.observations,
+                    acquisition.fundamentals.observations,
+                    acquisition.documents.passages,
+                    document_observations=acquisition.documents.observations,
+                )
+                _record_rejections(tracker, normalised)
+                write_json(run_dir / "03_normalisation.json", {
+                    **normalised.to_dict(),
+                    "evidence": [item.to_dict() for item in normalised.evidence],
+                })
 
-        # 4. Evidence store ----------------------------------------------
-        with tracker.stage("evidence_ingestion"):
-            written = store.save(normalised.evidence)
-            reader = EvidenceReader(
-                store=store, report_run_id=report_run_id,
-                ticker=plan.ticker, company=Normalizer(report_run_id, plan).company,
-            )
-            if written == 0:
-                tracker.warn("No evidence was written to the Evidence Store.")
+            # 4. Evidence store ----------------------------------------------
+            with tracker.stage("evidence_ingestion"):
+                written = store.save(normalised.evidence)
+                reader = EvidenceReader(
+                    store=store, report_run_id=report_run_id,
+                    ticker=plan.ticker, company=Normalizer(report_run_id, plan).company,
+                )
+                if written == 0:
+                    tracker.warn("No evidence was written to the Evidence Store.")
 
-        # 4.5 Data freshness check (best-effort, opt-in) ------------------
-        # Runs here, before analysis or synthesis touch the evidence at all -
-        # "fix data freshness before anything else" - rather than as part of
-        # the later gap-research addendum, so a stale dataset is disclosed
-        # up front instead of discovered on the last page.
-        freshness = FreshnessResult(checked=False)
-        if settings.check_data_freshness and settings.model.enabled:
-            with tracker.stage("freshness_check"):
-                try:
-                    freshness = await check_freshness(
-                        reader.company, plan.ticker, plan.request.report_date,
-                        reader.latest_reported_period(), settings.model,
-                        tracker=usage_tracker,
-                    )
-                    if freshness.mismatched:
-                        tracker.warn(
-                            "Live verification found a more recent public report "
-                            f"({freshness.verified_period}) than this dataset is anchored "
-                            f"on ({reader.latest_reported_period()}); see the notice on "
-                            "page 1."
+            # 4.5 Data freshness check (best-effort, opt-in) ------------------
+            # Runs here, before analysis or synthesis touch the evidence at all -
+            # "fix data freshness before anything else" - rather than as part of
+            # the later gap-research addendum, so a stale dataset is disclosed
+            # up front instead of discovered on the last page.
+            freshness = FreshnessResult(checked=False)
+            if settings.check_data_freshness and settings.model.enabled:
+                with tracker.stage("freshness_check"):
+                    try:
+                        freshness = await check_freshness(
+                            reader.company, plan.ticker, plan.request.report_date,
+                            reader.latest_reported_period(), settings.model,
+                            tracker=usage_tracker,
                         )
-                except Exception as exc:  # noqa: BLE001 - never sink the run over this
-                    log_event(logger, logging.WARNING, "freshness check failed",
-                              error=f"{type(exc).__name__}: {exc}")
-                    tracker.warn(
-                        f"Data freshness check failed: {type(exc).__name__}: {exc}")
-
-        # 4.6 Web gap-fill (best-effort, opt-in) ---------------------------
-        # Also runs before analysis/synthesis, so a section MegadataAPI left
-        # thin gets a chance to become evidence-backed rather than omitted -
-        # see pipeline.web_gap_fill for the two-gate verification every
-        # candidate fact must pass before it is written to the store.
-        web_gap_fill_result = WebGapFillResult(attempted=False)
-        if settings.web_fill_gaps and settings.model.enabled:
-            with tracker.stage("web_gap_fill"):
-                try:
-                    web_gap_fill_result, new_items = await fill_evidence_gaps(
-                        report_run_id, reader.company, plan.ticker, reader, settings.model,
-                        allowed_domains=settings.web_fill_allowed_domains,
-                        max_claims=settings.web_fill_max_claims,
-                        tracker=usage_tracker,
-                    )
-                    if new_items:
-                        store.save(new_items)
+                        if freshness.mismatched:
+                            tracker.warn(
+                                "Live verification found a more recent public report "
+                                f"({freshness.verified_period}) than this dataset is anchored "
+                                f"on ({reader.latest_reported_period()}); see the notice on "
+                                "page 1."
+                            )
+                    except Exception as exc:  # noqa: BLE001 - never sink the run over this
+                        log_event(logger, logging.WARNING, "freshness check failed",
+                                  error=f"{type(exc).__name__}: {exc}")
                         tracker.warn(
-                            f"Web research added {len(new_items)} source-verified fact(s) "
-                            f"for: {', '.join(web_gap_fill_result.topics_checked)}."
+                            f"Data freshness check failed: {type(exc).__name__}: {exc}")
+
+            # 4.6 Web gap-fill (best-effort, opt-in) ---------------------------
+            # Also runs before analysis/synthesis, so a section MegadataAPI left
+            # thin gets a chance to become evidence-backed rather than omitted -
+            # see pipeline.web_gap_fill for the two-gate verification every
+            # candidate fact must pass before it is written to the store.
+            web_gap_fill_result = WebGapFillResult(attempted=False)
+            if settings.web_fill_gaps and settings.model.enabled:
+                with tracker.stage("web_gap_fill"):
+                    try:
+                        web_gap_fill_result, new_items = await fill_evidence_gaps(
+                            report_run_id, reader.company, plan.ticker, reader, settings.model,
+                            allowed_domains=settings.web_fill_allowed_domains,
+                            max_claims=settings.web_fill_max_claims,
+                            tracker=usage_tracker,
                         )
-                except Exception as exc:  # noqa: BLE001 - never sink the run over this
-                    log_event(logger, logging.WARNING, "web gap-fill failed",
-                              error=f"{type(exc).__name__}: {exc}")
-                    tracker.warn(f"Web gap-fill failed: {type(exc).__name__}: {exc}")
-            write_json(run_dir / "04_6_web_gap_fill.json", web_gap_fill_result.to_dict())
+                        if new_items:
+                            store.save(new_items)
+                            tracker.warn(
+                                f"Web research added {len(new_items)} source-verified fact(s) "
+                                f"for: {', '.join(web_gap_fill_result.topics_checked)}."
+                            )
+                    except Exception as exc:  # noqa: BLE001 - never sink the run over this
+                        log_event(logger, logging.WARNING, "web gap-fill failed",
+                                  error=f"{type(exc).__name__}: {exc}")
+                        tracker.warn(f"Web gap-fill failed: {type(exc).__name__}: {exc}")
+                write_json(run_dir / "04_6_web_gap_fill.json", web_gap_fill_result.to_dict())
 
         # 5. Analytics and segment agents, technical appendix ------------
         # The technical appendix is a live Bloomberg OHLCV fetch plus a
@@ -239,7 +315,17 @@ async def generate_report(
         # is kicked off here to run concurrently with analysis rather than
         # waiting until after QA passes, when it used to start.
         technical_appendix_task: asyncio.Task | None = None
-        if settings.technical_appendix:
+        existing_appendix_raw = (
+            run_dir / f"{report_run_id}_technical_appendix_raw.pdf" if resume_from else None
+        )
+        if resume_from and existing_appendix_raw is not None and existing_appendix_raw.exists():
+            # Reuse the prior run's raw appendix fetch (a live Bloomberg OHLCV
+            # call) rather than repeating it purely to iterate on downstream
+            # code; a fresh full run still regenerates it as usual.
+            async def _reuse_technical_appendix() -> Path | None:
+                return existing_appendix_raw
+            technical_appendix_task = asyncio.create_task(_reuse_technical_appendix())
+        elif settings.technical_appendix:
             async def _build_technical_appendix() -> Path | None:
                 with tracker.stage("technical_appendix"):
                     try:
@@ -248,6 +334,7 @@ async def generate_report(
                             build_technical_appendix_pdf, plan.ticker, plan.request.report_date,
                             raw_path, credentials=settings.credentials,
                             timeout=settings.provider_timeout_seconds,
+                            min_request_interval_seconds=settings.megadata_min_request_interval_seconds,
                         )
                     except Exception as exc:  # noqa: BLE001 - non-core supplement
                         log_event(logger, logging.WARNING, "technical appendix failed",
@@ -292,6 +379,8 @@ async def generate_report(
             if web_gap_fill_result.attempted:
                 draft = replace(draft, metadata={
                     **draft.metadata, "web_gap_fill": web_gap_fill_result.to_dict()})
+            if carried_metadata:
+                draft = replace(draft, metadata={**draft.metadata, **carried_metadata})
 
         write_json(run_dir / "06_report_draft_initial.json", draft.to_dict())
 
@@ -324,6 +413,34 @@ async def generate_report(
                     repair_log[-1]["critical_after"] = len(qa_result.critical)
                     if not qa_result.has_critical_errors:
                         break
+
+                # Last resort: a statement still failing after the final LLM
+                # attempt is omitted deterministically (no model), so the loop
+                # always converges instead of blocking on one bad sentence.
+                # Repeated because the entailment reviewer is a model: a fresh
+                # QA pass can flag a sentence an earlier pass accepted.
+                for _round in range(3):
+                    if not qa_result.has_critical_errors:
+                        break
+                    outcome = await DraftRepairer(None).repair(
+                        draft, qa_result, reader, analytics)
+                    if not outcome.changed:
+                        break
+                    draft = outcome.draft
+                    qa_result = await qa_engine.validate(draft, plan, reader, analytics)
+                    repair_log.append({
+                        "attempt": "deterministic_omit",
+                        "events": [event.to_dict() for event in outcome.events],
+                        "critical_after": len(qa_result.critical),
+                    })
+
+            if settings.qa_auto_repair:
+                tidied = tidy_draft(draft, qa_result)
+                if tidied != draft:
+                    draft = tidied
+                    qa_result = await qa_engine.validate(draft, plan, reader, analytics)
+                    repair_log.append({"attempt": "tidy",
+                                       "critical_after": len(qa_result.critical)})
 
             draft = replace(draft, metadata={
                 **draft.metadata,
@@ -430,7 +547,11 @@ async def generate_report(
                         f"Technical appendix could not be merged: "
                         f"{type(exc).__name__}: {exc}")
                 finally:
-                    appendix_pdf_path.unlink(missing_ok=True)
+                    # A reused prior-run appendix is a resume input, not this
+                    # attempt's scratch output - keep it so later resumes can
+                    # reuse it too; only a freshly-fetched one is disposable.
+                    if appendix_pdf_path != existing_appendix_raw:
+                        appendix_pdf_path.unlink(missing_ok=True)
 
         tracker.set_outputs(json_path=str(report_json_path), pdf_path=str(pdf_path))
         status = (
@@ -543,13 +664,17 @@ def _record_rejections(tracker: RunTracker, normalised: NormalisationResult) -> 
 
 
 def generate_report_sync(
-    request: ResearchRequest | dict[str, Any], settings: Settings | None = None
+    request: ResearchRequest | dict[str, Any] | None = None,
+    settings: Settings | None = None,
+    *,
+    resume_from: str | None = None,
 ) -> ReportResult:
     """Blocking wrapper for scripts and tests."""
     import asyncio
 
     parsed = (
-        request if isinstance(request, ResearchRequest)
+        None if request is None
+        else request if isinstance(request, ResearchRequest)
         else ResearchRequest.from_dict(request)
     )
-    return asyncio.run(generate_report(parsed, settings))
+    return asyncio.run(generate_report(parsed, settings, resume_from=resume_from))

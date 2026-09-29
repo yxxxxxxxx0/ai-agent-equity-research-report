@@ -62,6 +62,15 @@
     "low"). Every other stage is unaffected. Omit to use the model's default
     effort.
 
+.PARAMETER ResumeFrom
+    An existing report_run_id (the "run_..." folder name under
+    <OutputDir>\runs\) whose plan and Evidence Store rows should be reused.
+    Re-runs analysis, synthesis, QA and rendering only - planning,
+    acquisition and normalisation are skipped entirely, so this does not
+    wait on (or pay for) another round of API/data-provider calls. -Ticker
+    and -ReportDate are ignored when this is set. -OutputDir must match
+    whatever output directory the original run used.
+
 .EXAMPLE
     .\run_report.ps1
     Prompts for a ticker, uses today's date, runs with whatever .env already
@@ -75,6 +84,12 @@
 .EXAMPLE
     .\run_report.ps1 -Ticker AMD -ReportDate 2026-09-02 -EnableGapResearch -CheckFreshness
     A fuller run with both opt-in live-research features turned on.
+
+.EXAMPLE
+    .\run_report.ps1 -ResumeFrom run_20260929T060809_f9cebb -OutputDir output_webui
+    Re-synthesizes and re-validates that run's already-fetched evidence
+    without re-running planning or acquisition - for iterating on
+    synthesis/QA/prompt changes.
 #>
 [CmdletBinding()]
 param(
@@ -90,18 +105,21 @@ param(
     [switch]$TechnicalAppendix,
     [switch]$CompactReport,
     [ValidateSet("high", "medium", "low")]
-    [string]$PlanningEffort
+    [string]$PlanningEffort,
+    [string]$ResumeFrom
 )
 
 $ErrorActionPreference = "Stop"
 
-if (-not $Ticker) {
-    $Ticker = Read-Host "Ticker to research (e.g. NVDA)"
-}
-$Ticker = $Ticker.Trim().ToUpper()
-if (-not $Ticker) {
-    Write-Error "A ticker is required."
-    exit 1
+if (-not $ResumeFrom) {
+    if (-not $Ticker) {
+        $Ticker = Read-Host "Ticker to research (e.g. NVDA)"
+    }
+    $Ticker = $Ticker.Trim().ToUpper()
+    if (-not $Ticker) {
+        Write-Error "A ticker is required."
+        exit 1
+    }
 }
 
 $repoRoot = $PSScriptRoot
@@ -146,8 +164,12 @@ if ($PlanningEffort) {
 }
 
 $modelConfigured = [bool]($env:EQR_MODEL_API_KEY -or $env:OPENROUTER_API_KEY)
-Write-Host "Ticker            : $Ticker"
-Write-Host "Report date       : $ReportDate"
+if ($ResumeFrom) {
+    Write-Host "Resuming from     : $ResumeFrom"
+} else {
+    Write-Host "Ticker            : $Ticker"
+    Write-Host "Report date       : $ReportDate"
+}
 Write-Host "Output dir        : $OutputDir"
 Write-Host "Model configured  : $modelConfigured$(if (-not $modelConfigured) { ' (mock/deterministic run - no API key set)' })"
 Write-Host "Skip real providers: $([bool]$SkipRealProviders)"
@@ -167,5 +189,9 @@ if (-not $python) {
     exit 1
 }
 
-& python -m eq_report --ticker $Ticker --report-date $ReportDate --output-dir $OutputDir
+if ($ResumeFrom) {
+    & python -m eq_report --resume $ResumeFrom --output-dir $OutputDir
+} else {
+    & python -m eq_report --ticker $Ticker --report-date $ReportDate --output-dir $OutputDir
+}
 exit $LASTEXITCODE

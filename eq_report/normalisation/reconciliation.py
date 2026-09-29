@@ -108,6 +108,40 @@ def _implausible(item: EvidenceItem) -> bool:
     return floor is not None and item.value is not None and item.value < floor
 
 
+def _has_publisher_url(item: EvidenceItem) -> bool:
+    """A link to the page that published the text, not just the API that served it.
+
+    ``retrieval_url`` alone is excluded on purpose: raw provider dumps (e.g. a
+    whole filing record serialised as one passage) carry only that.
+    """
+    return bool(item.original_source_url or item.source_url)
+
+
+def qualitative_status(item: EvidenceItem) -> tuple[EvidenceStatus, bool]:
+    """(status, is_canonical) for a passage with no numeric value.
+
+    A passage traceable to its publisher is citable narrative evidence; its
+    fact_type (e.g. ANALYST_OPINION for news) keeps opinion distinct from
+    reported fact, and the entailment reviewer still checks every claim.
+    """
+    if _has_publisher_url(item):
+        return EvidenceStatus.VALIDATED, True
+    return EvidenceStatus.UNVERIFIED, False
+
+
+def revalidate_qualitative(items: Iterable[EvidenceItem]) -> tuple[EvidenceItem, ...]:
+    """Re-apply the qualitative rule to stored rows (used when resuming a run)."""
+    updated = []
+    for item in items:
+        if item.value is not None or item.retrieval_provider == "web_gap_fill" \
+                or item.status is EvidenceStatus.REJECTED:
+            continue
+        status, canonical = qualitative_status(item)
+        if (status, canonical) != (item.status, item.is_canonical):
+            updated.append(replace(item, status=status, is_canonical=canonical))
+    return tuple(updated)
+
+
 def reconcile(items: Iterable[EvidenceItem]) -> tuple[EvidenceItem, ...]:
     """Keep all observations, but mark exactly which numeric facts are canonical."""
     prepared: list[EvidenceItem] = []
@@ -116,10 +150,11 @@ def reconcile(items: Iterable[EvidenceItem]) -> tuple[EvidenceItem, ...]:
         basis = infer_basis(item)
         fact_type = infer_fact_type(item)
         if item.value is None:
-            # Qualitative passages remain usable as context, but never as validated
-            # numeric evidence. This closes the raw-document numeric bypass.
+            # Never validated as numeric evidence (value is None, so the
+            # numeric-canonical checks still reject figures quoted from it).
+            status, canonical = qualitative_status(item)
             prepared.append(replace(item, basis=basis, fact_type=fact_type,
-                                    status=EvidenceStatus.UNVERIFIED, is_canonical=False))
+                                    status=status, is_canonical=canonical))
             continue
         key = _key(item, basis)
         candidate = replace(item, basis=basis, fact_type=fact_type,
