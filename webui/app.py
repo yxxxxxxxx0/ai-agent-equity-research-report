@@ -1130,7 +1130,7 @@ APP_STYLE = """
     .stat-v { font-size: 14px; }
     .stat-model .stat-v { font-size: 12.5px; line-height: 1.3; }
     .dash { flex: 1; min-height: 0; display: grid; gap: 12px; align-items: stretch;
-      grid-template-columns: minmax(250px, 16%) min(var(--paper-w, 46%), 58vw) minmax(0, 1fr); }
+      grid-template-columns: minmax(250px, 1fr) min(var(--paper-w, 46%), 58vw) minmax(380px, 640px); }
     .col { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
     .col .card { margin: 0; padding: 14px 16px; min-height: 0; }
     .col-a .card:last-child { flex: 1; overflow-y: auto; }
