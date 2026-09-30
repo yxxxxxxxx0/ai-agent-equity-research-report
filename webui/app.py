@@ -1254,130 +1254,102 @@ APP_STYLE = """
     .src-excerpt, .src-plain { font-size: 11.5px; }
     .src-row, .src-h, .src-tag { font-size: 10.5px; }
     .src-link { font-size: 11.5px; }
+    /* ---- redesign: a wide workflow strip on top; run + steps | report | QA review ---- */
+    .dash { grid-template-columns: minmax(250px, 300px) minmax(0, 1fr) minmax(320px, 400px); }
+    .map-card { flex: none; height: clamp(190px, 26vh, 270px); padding: 10px 16px 8px; margin: 0 0 12px; display: flex; flex-direction: column; }
+    .map-card h2 { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--faint); margin: 0 0 2px; }
+    .map-card .fc-scroll { align-items: center; }
+    .col-c .qa-card { flex: 1; }
+    .rp-doc { max-width: 920px; margin: 0 auto; }
+    @media (max-width: 1100px) { .map-card { height: auto; min-height: 220px; } }
+    @media (max-height: 940px) {
+      .dash .step-desc { display: none; }
+      .dash .step { padding-bottom: 10px; }
+      .dash .run-ticker { font-size: 24px; margin: 8px 0 4px; }
+    }
     .error-note, .qa-note { background: #2c1a1f; border-color: #5b2a33; color: #fca5a5; }
 """
 
-# Absolute-positioned nodes + an SVG line layer, laid out to match the
-# pipeline's real shape: request -> plan -> {market data | fundamentals |
-# documents} -> normalisation -> evidence store -> {analytics | segment
-# agents | technical appendix} -> synthesis -> QA -> (pass) {pdf | compact
-# pdf} / (blocked) withheld. Technical appendix and compact/full PDF are
-# genuinely concurrent in the pipeline now (see orchestrator.py), not just
-# drawn that way - the diagram matches the real asyncio.gather() calls.
-FLOWCHART_HTML = """
-<div class="fc-scroll"><div class="fc-wrap">
-  <svg class="fc-svg" viewBox="0 0 680 716">
-    <defs>
-      <marker id="fc-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-        <path d="M0,0 L10,5 L0,10 z" style="fill:var(--rule)"></path>
-      </marker>
-      <marker id="fc-arrow-pos" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-        <path d="M0,0 L10,5 L0,10 z" style="fill:var(--pos)"></path>
-      </marker>
-      <marker id="fc-arrow-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-        <path d="M0,0 L10,5 L0,10 z" style="fill:var(--blue)"></path>
-      </marker>
-      <marker id="fc-arrow-neg" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-        <path d="M0,0 L10,5 L0,10 z" style="fill:var(--neg-border)"></path>
-      </marker>
-    </defs>
-    <g style="stroke:var(--rule);stroke-width:2;fill:none;">
-      <path d="M340,72 L340,86"></path>
-      <path d="M135,86 L545,86"></path>
-      <path d="M135,86 L135,100"></path>
-      <path d="M340,86 L340,100"></path>
-      <path d="M545,86 L545,100"></path>
+# The workflow map is drawn left to right so it can use the whole width of the screen
+# (the old top-to-bottom layout was height-limited and shrank to unreadable text).
+# Parallel stages (acquisition branches, analysis branches, the two PDFs) are stacked
+# in a column; the QA gate has its repair loop above it and Blocked below it. Every
+# node keeps its data-key/data-node so the live state, timers and cost badges work.
+_MAP_W, _MAP_H = 1498, 176
+#          (stage key,  node id,          x,    y,   w,   h,  name,               blurb,                          kind)
+_MAP_NODES = (
+    ("planning", "planning", 8, 57, 128, 64, "Planning", "Scope the plan", ""),
+    ("acquisition", "market_data", 172, 6, 150, 46, "Market data", "Price &amp; multiples", ""),
+    ("acquisition", "fundamentals_data", 172, 66, 150, 46, "Fundamentals", "Financials &amp; KPIs", ""),
+    ("acquisition", "documents_data", 172, 126, 150, 46, "Documents", "Filings &amp; news", ""),
+    ("normalisation", "normalisation", 358, 57, 150, 64, "Normalisation", "Parsers first, verified LLM rescue", ""),
+    ("evidence_ingestion", "evidence_store", 544, 57, 140, 64, "Evidence store", "Canonical facts", ""),
+    ("analysis", "analytics_engine", 720, 6, 156, 46, "Analytics engine", "Growth &amp; mix", ""),
+    ("analysis", "segment_agents", 720, 66, 156, 46, "Segment agents", "Section research", ""),
+    ("technical_appendix", "technical_appendix", 720, 126, 156, 46, "Technical appendix", "Live OHLCV chart", ""),
+    ("synthesis", "synthesis", 912, 57, 140, 64, "Synthesis", "Narrative &amp; exhibits", ""),
+    ("qa", "qa_gate", 1088, 59, 150, 60, "QA gate", "Rules + entailment + triage", "fc-gate"),
+    ("qa", "qa_repair", 1088, 0, 150, 40, "QA repair loop", "Trim or omit, then re-check", "notime"),
+    ("__blocked", "", 1088, 139, 150, 34, "Blocked", "No PDF - fixes required", "fc-blocked"),
+    ("pdf", "pdf", 1340, 34, 158, 52, "Render PDF", "Full report + appendix", ""),
+    ("compact_pdf", "compact_pdf", 1340, 92, 158, 52, "Compact PDF", "Brief, technical page, refs", ""),
+)
 
-      <path d="M135,160 L135,174"></path>
-      <path d="M340,160 L340,174"></path>
-      <path d="M545,160 L545,174"></path>
-      <path d="M135,174 L545,174"></path>
-      <path d="M340,174 L340,186"></path>
 
-      <path d="M340,242 L340,270"></path>
+def _flowchart_html() -> str:
+    def arrow(d: str, colour: str = "rule", marker: str = "fc-arrow", extra: str = "") -> str:
+        return (f'<path d="{d}" style="stroke:var(--{colour});stroke-width:2;fill:none;{extra}" '
+                f'marker-end="url(#{marker})"></path>')
 
-      <path d="M340,326 L340,340"></path>
-      <path d="M135,340 L545,340"></path>
-      <path d="M135,340 L135,354"></path>
-      <path d="M340,340 L340,354"></path>
-      <path d="M545,340 L545,354"></path>
+    def bus(d: str, colour: str = "rule") -> str:
+        return f'<path d="{d}" style="stroke:var(--{colour});stroke-width:2;fill:none;"></path>'
 
-      <path d="M135,414 L135,428"></path>
-      <path d="M340,414 L340,428"></path>
-      <path d="M545,414 L545,428"></path>
-      <path d="M135,428 L545,428"></path>
-      <path d="M340,428 L340,440"></path>
+    rows = (29, 89, 149)
+    lines = [
+        bus("M136,89 L154,89"), bus("M154,29 L154,149"),
+        *[arrow(f"M154,{y} L172,{y}") for y in rows],                      # planning -> acquisition
+        *[bus(f"M322,{y} L340,{y}") for y in rows], bus("M340,29 L340,149"),
+        arrow("M340,89 L358,89"),                                        # acquisition -> normalisation
+        arrow("M508,89 L544,89"),                                        # normalisation -> evidence
+        bus("M684,89 L702,89"), bus("M702,29 L702,149"),
+        *[arrow(f"M702,{y} L720,{y}") for y in rows],                      # evidence -> analysis
+        *[bus(f"M876,{y} L894,{y}") for y in rows], bus("M894,29 L894,149"),
+        arrow("M894,89 L912,89"),                                        # analysis -> synthesis
+        arrow("M1052,89 L1088,89"),                                      # synthesis -> QA gate
+        arrow("M1140,59 L1140,42", "neg-border", "fc-arrow-neg"),        # critical -> repair loop
+        arrow("M1186,40 L1186,57", "blue", "fc-arrow-blue"),             # repaired draft -> re-check
+        arrow("M1163,119 L1163,137", "neg-border", "fc-arrow-neg", "stroke-dasharray:5 3;"),  # unfixed
+        bus("M1238,89 L1314,89", "pos"), bus("M1314,60 L1314,118", "pos"),
+        arrow("M1314,60 L1340,60", "pos", "fc-arrow-pos"),               # clears QA -> PDFs
+        arrow("M1314,118 L1340,118", "pos", "fc-arrow-pos"),
+    ]
+    labels = (
+        '<text x="1134" y="54" text-anchor="end" style="font:700 10px var(--font-ui);fill:var(--neg-ink);">critical</text>'
+        '<text x="1192" y="54" style="font:700 10px var(--font-ui);fill:var(--blue);">re-check</text>'
+        '<text x="1170" y="132" style="font:700 10px var(--font-ui);fill:var(--neg-ink);">unfixed</text>'
+        '<rect x="1245" y="80" width="62" height="18" rx="9" style="fill:var(--card-bg);stroke:var(--pos);stroke-width:1.5;"></rect>'
+        '<text x="1276" y="92.5" text-anchor="middle" style="font:700 10px var(--font-ui);fill:var(--pos);">clears QA</text>'
+    )
+    markers = "".join(
+        f'<marker id="{mid}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">'
+        f'<path d="M0,0 L10,5 L0,10 z" style="fill:var(--{colour})"></path></marker>'
+        for mid, colour in (("fc-arrow", "rule"), ("fc-arrow-pos", "pos"), ("fc-arrow-neg", "neg-border"),
+                            ("fc-arrow-blue", "blue")))
+    nodes = []
+    for key, node, x, y, w, h, name, blurb, kind in _MAP_NODES:
+        classes = "fc-node" + (" fc-gate" if kind == "fc-gate" else " fc-blocked" if kind == "fc-blocked" else "")
+        attrs = f'data-key="{key}"' + (f' data-node="{node}"' if node else "") + (' data-notime="1"' if kind == "notime" else "")
+        pad = "padding:4px 10px;" if h <= 40 else ""
+        nodes.append(
+            f'<div class="{classes}" {attrs} style="left:{x}px;top:{y}px;width:{w}px;height:{h}px;{pad}">'
+            f'<div class="fc-name">{name}</div><div class="fc-blurb">{blurb}</div></div>')
+    return (f'<div class="fc-scroll"><div class="fc-wrap" data-w="{_MAP_W}" data-h="{_MAP_H}" '
+            f'style="width:{_MAP_W}px;height:{_MAP_H}px;">'
+            f'<svg class="fc-svg" viewBox="0 0 {_MAP_W} {_MAP_H}" style="width:{_MAP_W}px;height:{_MAP_H}px;">'
+            f'<defs>{markers}</defs>{"".join(lines)}{labels}</svg>{"".join(nodes)}</div></div>')
 
-      <path d="M340,496 L340,524"></path>
-    </g>
-    <path d="M340,580 L340,612 L190,612 L190,634" style="stroke:var(--pos);stroke-width:2;fill:none;" marker-end="url(#fc-arrow-pos)"></path>
-    <path d="M340,612 L490,612 L490,634" style="stroke:var(--pos);stroke-width:2;fill:none;" marker-end="url(#fc-arrow-pos)"></path>
-    <rect x="294" y="584" width="92" height="18" rx="9" style="fill:var(--card-bg);stroke:var(--pos);stroke-width:1.5;"></rect>
-    <text x="340" y="596.5" text-anchor="middle" style="font:700 10px var(--font-ui);fill:var(--pos);">clears QA</text>
 
-    <path d="M240,538 L194,538" style="stroke:var(--neg-border);stroke-width:2;fill:none;" marker-end="url(#fc-arrow-neg)"></path>
-    <text x="217" y="531" text-anchor="middle" style="font:700 9.5px var(--font-ui);fill:var(--neg-ink);">critical</text>
-    <path d="M194,566 L238,566" style="stroke:var(--blue);stroke-width:2;fill:none;" marker-end="url(#fc-arrow-blue)"></path>
-    <text x="217" y="581" text-anchor="middle" style="font:700 9.5px var(--font-ui);fill:var(--blue);">re-check</text>
-
-    <path d="M440,552 L490,552" style="stroke:var(--neg-border);stroke-width:2;fill:none;stroke-dasharray:5 3;" marker-end="url(#fc-arrow-neg)"></path>
-    <text x="465" y="545" text-anchor="middle" style="font:700 9.5px var(--font-ui);fill:var(--neg-ink);">unfixed</text>
-  </svg>
-
-  <div class="fc-node" data-key="planning" data-node="planning" style="left:240px;top:16px;width:200px;height:56px;">
-    <div class="fc-name">Planning</div><div class="fc-blurb">Scope the research plan</div>
-  </div>
-
-  <div class="fc-node" data-key="acquisition" data-node="market_data" style="left:40px;top:100px;width:190px;height:60px;">
-    <div class="fc-name">Market data</div><div class="fc-blurb">Price, cap, multiples</div>
-  </div>
-  <div class="fc-node" data-key="acquisition" data-node="fundamentals_data" style="left:245px;top:100px;width:190px;height:60px;">
-    <div class="fc-name">Fundamentals</div><div class="fc-blurb">Financials &amp; KPIs</div>
-  </div>
-  <div class="fc-node" data-key="acquisition" data-node="documents_data" style="left:450px;top:100px;width:190px;height:60px;">
-    <div class="fc-name">Documents</div><div class="fc-blurb">Filings, news, transcripts</div>
-  </div>
-
-  <div class="fc-node" data-key="normalisation" data-node="normalisation" style="left:240px;top:186px;width:200px;height:56px;">
-    <div class="fc-name">Normalisation</div><div class="fc-blurb">Parsers first; verified LLM rescue for rejects</div>
-  </div>
-
-  <div class="fc-node" data-key="evidence_ingestion" data-node="evidence_store" style="left:240px;top:270px;width:200px;height:56px;">
-    <div class="fc-name">Evidence store</div><div class="fc-blurb">Canonical facts, written</div>
-  </div>
-
-  <div class="fc-node" data-key="analysis" data-node="analytics_engine" style="left:40px;top:354px;width:190px;height:60px;">
-    <div class="fc-name">Analytics engine</div><div class="fc-blurb">Growth, mix, surprise</div>
-  </div>
-  <div class="fc-node" data-key="analysis" data-node="segment_agents" style="left:245px;top:354px;width:190px;height:60px;">
-    <div class="fc-name">Segment agents</div><div class="fc-blurb">Per-section research</div>
-  </div>
-  <div class="fc-node" data-key="technical_appendix" data-node="technical_appendix" style="left:450px;top:354px;width:190px;height:60px;">
-    <div class="fc-name">Technical appendix</div><div class="fc-blurb">Live OHLCV chart, independent of the draft</div>
-  </div>
-
-  <div class="fc-node" data-key="synthesis" data-node="synthesis" style="left:240px;top:440px;width:200px;height:56px;">
-    <div class="fc-name">Synthesis</div><div class="fc-blurb">Draft narrative &amp; exhibits</div>
-  </div>
-
-  <div class="fc-node fc-gate" data-key="qa" data-node="qa_gate" style="left:240px;top:524px;width:200px;height:56px;">
-    <div class="fc-name">QA gate</div><div class="fc-blurb">Rules + LLM entailment + triage</div>
-  </div>
-  <div class="fc-node" data-key="qa" data-notime="1" data-node="qa_repair" style="left:8px;top:524px;width:186px;height:56px;">
-    <div class="fc-name">QA repair loop</div><div class="fc-blurb">Trim or omit critical statements, then re-check</div>
-  </div>
-  <div class="fc-node fc-blocked" data-key="__blocked" style="left:492px;top:524px;width:170px;height:56px;">
-    <div class="fc-name">Blocked</div><div class="fc-blurb">No PDF - fixes required</div>
-  </div>
-
-  <div class="fc-node" data-key="pdf" data-node="pdf" style="left:50px;top:636px;width:280px;height:60px;">
-    <div class="fc-name">Render PDF</div><div class="fc-blurb">Full report, merged with the technical appendix</div>
-  </div>
-  <div class="fc-node" data-key="compact_pdf" data-node="compact_pdf" style="left:350px;top:636px;width:280px;height:60px;">
-    <div class="fc-name">Compact PDF</div><div class="fc-blurb">Brief, technical page, references</div>
-  </div>
-</div></div>
-"""
+FLOWCHART_HTML = _flowchart_html()
 
 APP_HTML = """
 <!doctype html>
@@ -1397,6 +1369,12 @@ APP_HTML = """
       </div>
     </header>
 
+    </div>
+
+    <div class="card map-card">
+      <h2>Workflow map</h2>
+      <p class="hint">The pipeline's real shape - parallel acquisition sources, parallel analysis, the QA pass/fail gate. Nodes glow live as your report moves through it.</p>
+      """ + FLOWCHART_HTML + """
     </div>
 
     <div class="layout dash">
@@ -1448,11 +1426,6 @@ APP_HTML = """
 
       </div>
       <div class="col col-c">
-    <div class="card map-card">
-      <h2>Workflow map</h2>
-      <p class="hint">The pipeline's real shape - parallel acquisition sources, parallel analysis, the QA pass/fail gate. Nodes glow live as your report moves through it.</p>
-      """ + FLOWCHART_HTML + """
-    </div>
     <div class="card qa-card">
       <div class="qa-head">
         <h2>4. QA review</h2>
@@ -1693,7 +1666,8 @@ APP_HTML = """
       const wrap = document.querySelector(".map-card .fc-wrap");
       if (!box || !wrap) return;
       wrap.style.zoom = 1;
-      const s = Math.min(box.clientWidth / 680, box.clientHeight / 716, 1.3);
+      const W = Number(wrap.dataset.w) || 680, H = Number(wrap.dataset.h) || 716;
+      const s = Math.min(box.clientWidth / W, box.clientHeight / H, 1.4);
       wrap.style.zoom = Math.max(0.3, s);
     }
     window.addEventListener("resize", fitMap);
@@ -1811,7 +1785,7 @@ APP_HTML = """
       const omitted = (md.sections_omitted || []);
       const omit = omitted.length ? `<div class="rp-omit"><b>Left out:</b> ${omitted.map(o => esc((o.section || "").replace(/_/g, " ")) + " (" + esc(o.reason || "") + ")").join("; ")}</div>` : "";
       const cites = (d.citations || []).map(c => `<li id="cite-${c.ref_number}"><b>[${c.ref_number}]</b>${esc(c.text)}${c.source_url ? `<br>${(c.source_url.startsWith("http://") || c.source_url.startsWith("https://")) ? `<a href="${esc(c.source_url)}" target="_blank" rel="noopener">${esc(c.source_url)}</a>` : esc(c.source_url)}` : ""}</li>`).join("");
-      return head + body + omit + (cites ? `<section class="rp-sec"><h3 class="rp-h"><span class="rp-n">${num + 1}</span>Sources</h3><ol class="rp-cites" style="list-style:none">${cites}</ol></section>` : "");
+      return '<div class="rp-doc">' + head + body + omit + (cites ? `<section class="rp-sec"><h3 class="rp-h"><span class="rp-n">${num + 1}</span>Sources</h3><ol class="rp-cites" style="list-style:none">${cites}</ol></section>` : "") + '</div>';
     }
 
     function renderViewer(job) {
