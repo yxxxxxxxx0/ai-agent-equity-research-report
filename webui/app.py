@@ -1409,16 +1409,17 @@ APP_HTML = """
           <button type="button" id="stop-btn" class="btn btn-stop" onclick="stopRun()" style="display:none">&#9632; Stop run</button>
         </div>
 
-        <div class="card steps-card">
-          <h2>2. Generating Reports</h2>
-          <div class="steps" id="steps"></div>
-        </div>
         <div class="card statbox">
           <div class="stat-row"><span class="stat-k">Elapsed</span><span class="stat-v" id="t-elapsed">&mdash;</span></div>
           <div class="stat-row"><span class="stat-k">LLM cost</span><span class="stat-v" id="t-cost">$0.00</span></div>
           <div class="stat-row"><span class="stat-k">Tokens</span><span class="stat-v" id="t-tokens">&mdash;</span></div>
           <div class="stat-row"><span class="stat-k">Credits left</span><span class="stat-v" id="t-credits">&mdash;</span></div>
           <div class="stat-row" title="Credits this API key has used since 00:00 UTC"><span class="stat-k">Used today</span><span class="stat-v" id="t-today">&mdash;</span></div>
+        </div>
+
+        <div class="card steps-card">
+          <h2>2. Generating Reports</h2>
+          <div class="steps" id="steps"></div>
         </div>
       </div>
       <div class="col col-b">

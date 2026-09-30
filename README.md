@@ -69,7 +69,7 @@ returns you to the home page.
 
 **Watch it run**
 
-- **The stats panel** in the bottom-left corner shows elapsed time, LLM cost so far, tokens, your remaining
+- **The stats panel** under card 1 shows elapsed time, LLM cost so far, tokens, your remaining
   OpenRouter credits, and how much you have used today (this API key's usage since 00:00 UTC, as OpenRouter
   reports it). The clocks stop when a run ends or is stopped. The home page shows credits left and used today too.
 - **2. Generating Reports** is a five-step tracker with a timer on each step.
