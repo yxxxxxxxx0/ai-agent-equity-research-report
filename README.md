@@ -1,4 +1,4 @@
-# Equity Research Studio
+# EQR Research Report
 
 An end-to-end, LLM-assisted equity research report generator. Give it a ticker and
 it plans the research, pulls market, fundamentals and filings data, turns it into a
