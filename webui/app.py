@@ -250,6 +250,43 @@ usage_module.UsageTracker.record = _tracked_record
 configure_logging("INFO")  # lock in handlers now so per-run calls don't reset them
 
 
+def _qa_review(result, run_dir: Path | None) -> dict:
+    """Everything QA and the run flagged, for the UI's QA review section."""
+    qa = result.qa_result
+    findings = [
+        {"severity": f.severity.value, "check": f.check, "section": f.section,
+         "message": f.message, "subject": (f.subject or "")[:300]}
+        for f in (qa.findings if qa else ())
+    ]
+    repairs = []
+    repair_file = run_dir / "07_qa_repair.json" if run_dir else None
+    if repair_file is not None and repair_file.exists():
+        try:
+            attempts = json.loads(repair_file.read_text(encoding="utf-8")).get("attempts", [])
+        except (OSError, ValueError):
+            attempts = []
+        for attempt in attempts:
+            for event in attempt.get("events", []):
+                repairs.append({
+                    "step": str(attempt.get("attempt")), "section": event.get("section"),
+                    "action": event.get("action"), "checks": event.get("checks", []),
+                    "original": (event.get("original_text") or "")[:300],
+                    "repaired": (event.get("repaired_text") or "")[:300],
+                })
+    run = result.run
+    return {
+        "counts": {s: sum(1 for f in findings if f["severity"] == s)
+                   for s in ("critical", "warning", "info")},
+        "findings": findings,
+        "repairs": repairs,
+        "notices": {
+            "warnings": [str(w) for w in (run.warnings if run else [])][:60],
+            "errors": [str(e.get("message") or e) if isinstance(e, dict) else str(e)
+                       for e in (run.errors if run else [])][:60],
+        },
+    }
+
+
 def _run_job(
     job_id: str, ticker: str | None, report_date: dt.date | None,
     resume_from: str | None = None, model: str | None = None,
@@ -329,6 +366,7 @@ def _run_job(
                 qa_critical=len(qa.critical) if qa else None,
                 qa_warnings=len(qa.warnings) if qa else None,
                 qa_reasons=qa_reasons,
+                qa_review=_qa_review(result, run_dir),
                 artifacts=artifacts,
                 error=None if (result.succeeded and result.compact_pdf_path) else (
                     f"QA blocked publication: {len(qa.critical)} critical finding(s)."
@@ -768,6 +806,42 @@ APP_STYLE = """
     .model-custom:focus { outline: none; }
     .model-price { margin: 8px 0 0; font-size: 12.5px; color: var(--muted); line-height: 1.4; }
 
+    .qa-card { margin-top: 22px; }
+    .qa-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .qa-head h2 { margin: 0; }
+    .qa-badges { display: flex; gap: 8px; flex-wrap: wrap; }
+    .badge {
+      font-size: 12px; font-weight: 800; padding: 4px 11px; border-radius: 99px;
+      border: 1px solid transparent; font-variant-numeric: tabular-nums;
+    }
+    .badge.crit { background: var(--neg-bg); color: var(--neg-ink); border-color: #f3c8c8; }
+    .badge.warn { background: #fff4dd; color: #7a5100; border-color: #f2dba4; }
+    .badge.info { background: #eef1f6; color: var(--ink-soft); border-color: var(--border); }
+    .badge.fix { background: var(--blue-soft); color: var(--navy); border-color: var(--blue-ring); }
+    .qa-empty { color: var(--muted); font-size: 13.5px; padding: 18px 0 4px; }
+    .qa-group { border: 1px solid var(--border); border-radius: 12px; margin-top: 12px; overflow: hidden; background: #fff; }
+    .qa-group > summary {
+      cursor: pointer; list-style: none; padding: 12px 16px; font-size: 14px; font-weight: 700;
+      display: flex; align-items: center; gap: 10px; user-select: none;
+    }
+    .qa-group > summary::-webkit-details-marker { display: none; }
+    .qa-group > summary::before {
+      content: ""; width: 7px; height: 7px; border-right: 2px solid var(--faint);
+      border-bottom: 2px solid var(--faint); transform: rotate(-45deg); transition: transform 120ms;
+    }
+    .qa-group[open] > summary::before { transform: rotate(45deg); }
+    .qa-group.crit > summary { background: var(--neg-bg); color: var(--neg-ink); }
+    .qa-group.warn > summary { background: #fff4dd; color: #7a5100; }
+    .qa-group.fix > summary { background: var(--blue-soft); color: var(--navy); }
+    .qa-count { margin-left: auto; font-family: var(--font-mono); font-size: 12.5px; opacity: 0.85; }
+    .qa-item { padding: 12px 16px; border-top: 1px solid var(--border); font-size: 13.5px; line-height: 1.5; }
+    .qa-meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 4px; }
+    .qa-check { font-family: var(--font-mono); font-size: 11.5px; font-weight: 700; background: #f3f5f9; border-radius: 6px; padding: 2px 7px; color: var(--ink-soft); }
+    .qa-sec { font-size: 11.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+    .qa-subject { margin-top: 6px; padding: 7px 10px; border-left: 3px solid var(--border); background: #fafbfd; color: var(--muted); font-size: 12.5px; }
+    .qa-action { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; padding: 2px 8px; border-radius: 99px; background: var(--blue-soft); color: var(--navy); }
+    .qa-action.omit { background: #eef1f6; color: var(--ink-soft); }
+    .qa-arrow { color: var(--faint); margin: 0 4px; }
     .fc-node { border-radius: 8px; box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05); }
     .map-card .hint { max-width: 760px; }
 """
@@ -984,6 +1058,15 @@ APP_HTML = """
           </div>
         </div>
       </div>
+    </div>
+
+    <div class="card qa-card">
+      <div class="qa-head">
+        <h2>4. QA review</h2>
+        <div class="qa-badges" id="qa-badges"></div>
+      </div>
+      <p class="hint">What the quality checks raised against the evidence while this report was generated, what the repair loop changed in response, and any pipeline notices.</p>
+      <div id="qa-body"><div class="qa-empty">Findings, repairs and notices appear here once QA has run.</div></div>
     </div>
 
     <div class="card map-card">
@@ -1250,6 +1333,56 @@ APP_HTML = """
       }
     }
 
+    function esc(s) {
+      return String(s == null ? "" : s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+    }
+
+    function qaGroup(cls, title, items, open) {
+      if (!items.length) return "";
+      return `<details class="qa-group ${cls}" ${open ? "open" : ""}>
+        <summary>${title}<span class="qa-count">${items.length}</span></summary>${items.join("")}</details>`;
+    }
+
+    function renderQA(job) {
+      const body = document.getElementById("qa-body");
+      const badges = document.getElementById("qa-badges");
+      const qa = job && job.qa_review;
+      if (!qa) {
+        badges.innerHTML = "";
+        body.innerHTML = `<div class="qa-empty">${job && job.status === "running"
+          ? "QA has not finished yet - findings appear here when it does."
+          : "Findings, repairs and notices appear here once QA has run."}</div>`;
+        return;
+      }
+      const c = qa.counts, notices = qa.notices || {warnings: [], errors: []};
+      const nNotices = notices.warnings.length + notices.errors.length;
+      badges.innerHTML =
+        `<span class="badge crit">${c.critical} critical</span>` +
+        `<span class="badge warn">${c.warning} warning${c.warning === 1 ? "" : "s"}</span>` +
+        `<span class="badge info">${c.info} info</span>` +
+        (qa.repairs.length ? `<span class="badge fix">${qa.repairs.length} repaired</span>` : "");
+      const finding = f => `<div class="qa-item">
+        <div class="qa-meta"><span class="qa-check">${esc(f.check)}</span>${f.section ? `<span class="qa-sec">${esc(f.section.replace(/_/g, " "))}</span>` : ""}</div>
+        <div>${esc(f.message)}</div>${f.subject ? `<div class="qa-subject">${esc(f.subject)}</div>` : ""}</div>`;
+      const by = sev => qa.findings.filter(f => f.severity === sev).map(finding);
+      const repair = r => `<div class="qa-item">
+        <div class="qa-meta"><span class="qa-action ${r.action && r.action.includes("omit") ? "omit" : ""}">${esc((r.action || "").replace(/_/g, " "))}</span>
+          <span class="qa-sec">${esc((r.section || "").replace(/_/g, " "))}</span>
+          ${(r.checks || []).map(k => `<span class="qa-check">${esc(k)}</span>`).join("")}</div>
+        <div class="qa-subject">${esc(r.original)}</div>
+        ${r.repaired ? `<div class="qa-subject" style="border-left-color:var(--blue)"><b>Rewritten as:</b> ${esc(r.repaired)}</div>` : ""}</div>`;
+      const notice = (cls, text) => `<div class="qa-item"><span class="qa-check">${cls}</span> ${esc(text)}</div>`;
+      const html =
+        qaGroup("crit", "Critical findings", by("critical"), true) +
+        qaGroup("warn", "Warnings", by("warning"), true) +
+        qaGroup("info", "Info", by("info"), false) +
+        qaGroup("fix", "Repairs made during QA", qa.repairs.map(repair), false) +
+        qaGroup("warn", "Pipeline notices", [
+          ...notices.errors.map(e => notice("error", e)),
+          ...notices.warnings.map(w => notice("warning", w))], false);
+      body.innerHTML = html || `<div class="qa-empty">QA ran and raised nothing.</div>`;
+    }
+
     function toggleResumeRow(evt) {
       evt.preventDefault();
       const row = document.getElementById("resume-row");
@@ -1325,6 +1458,7 @@ APP_HTML = """
       renderSteps(job);
       applyFlowchart(job);
       renderViewer(job);
+      renderQA(job);
       updateTelemetry(job);
       const btn = document.getElementById("generate-btn");
       const modelSel = document.getElementById("model-select");
@@ -1344,6 +1478,7 @@ APP_HTML = """
     }
 
     renderSteps(null);
+    renderQA(null);
     loadModels();
     tickTimer = setInterval(tickTimes, 1000);
     if (jobId) { renderViewer({status: "running"}); poll(); }

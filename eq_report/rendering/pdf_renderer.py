@@ -369,74 +369,23 @@ class PdfReportRenderer:
         self, body: list[ReportSectionDraft], draft: ReportDraft, styles,
         *, annotations: dict[str, str] | None = None,
     ) -> list:
-        """Render the key-data strip, then the opening section at full width.
+        """Render the opening section at full width.
 
-        The former implementation nested the complete Key Takeaways table in
-        the left cell of another two-column table.  ReportLab cannot reliably
-        split a nested table cell across pages; sufficiently long takeaways
-        therefore painted over one another.  A compact full-width data strip
-        preserves the first-page figures while allowing every narrative
-        flowable to paginate normally in the document frame.
+        The first-page key-data strip was dropped on request; the figures stay
+        in the report JSON (``key_data``) and in the body tables.
         """
         if not body:
             return []
         lead = self._section(
             1, body[0], draft, styles, width=CONTENT_W, top_level=False,
             annotations=annotations)
-        if draft.key_data is None or draft.key_data.is_empty:
-            return lead
-        return [self._key_data_strip(draft.key_data, styles), Spacer(1, 7), *lead]
-
-    def _key_data_strip(self, panel: KeyDataPanel, styles) -> Table:
-        """Compact two-up grid used above the opening narrative."""
-        cards = []
-        # A single group should read as a deliberate, full-width strip rather
-        # than as the left half of an unfinished two-column grid.
-        card_width = CONTENT_W if len(panel.groups) == 1 else CONTENT_W / 2
-        for group in panel.groups:
-            rows = [[Paragraph(_escape(group.title), styles["panel_group"]), ""]]
-            rows.extend([
-                [Paragraph(_escape(item.label), styles["panel_label"]),
-                 Paragraph(_escape(item.value), styles["panel_value"])]
-                for item in group.items
-            ])
-            card = Table(rows, colWidths=[card_width * 0.58, card_width * 0.42])
-            card.setStyle(TableStyle([
-                ("SPAN", (0, 0), (1, 0)),
-                ("BACKGROUND", (0, 0), (-1, -1), ACCENT_SOFT),
-                ("LINEABOVE", (0, 0), (-1, 0), 1, ACCENT),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                ("TOPPADDING", (0, 0), (-1, -1), 2),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ]))
-            cards.append(card)
-
-        if len(cards) == 1:
-            return cards[0]
-
-        outer_rows = []
-        for index in range(0, len(cards), 2):
-            pair = cards[index:index + 2]
-            if len(pair) == 1:
-                pair.append("")
-            outer_rows.append(pair)
-        strip = Table(outer_rows, colWidths=[card_width, card_width], hAlign="LEFT")
-        strip.setStyle(TableStyle([
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 0),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-            ("TOPPADDING", (0, 0), (-1, -1), 0),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ]))
-        return strip
+        return lead
 
     def _back_matter(
         self, draft: ReportDraft, qa_result: QAResult | None, styles,
         *, number: int, has_body: bool = True,
     ) -> list:
-        """Sources, data gaps, what was left out, then the QA trail.
+        """Sources, data gaps, then what was left out.
 
         All four are one apparatus under one heading. The sources section used
         to print its own numbered heading in the body and the citation list
@@ -484,16 +433,6 @@ class PdfReportRenderer:
             story.append(Spacer(1, 6))
             story.append(self._omissions_box(omitted, styles))
 
-        # narrative.section_omitted warnings restate the omissions box above
-        # under a second heading - the report already disclosed the drop as
-        # an editorial choice, so it isn't a QA-worthy defect to flag again.
-        printable_warnings = [
-            finding for finding in (qa_result.warnings if qa_result else [])
-            if finding.check != "narrative.section_omitted"
-        ]
-        if printable_warnings:
-            story.append(Spacer(1, 6))
-            story.append(self._qa_box(printable_warnings, styles))
         return story
 
     # -- key data panel --------------------------------------------------
@@ -642,26 +581,6 @@ class PdfReportRenderer:
             ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
         ]))
         return table
-
-    def _qa_box(self, warnings: list, styles) -> Table:
-        heading = Paragraph(
-            f"QA review — {len(warnings)} warning(s) raised before "
-            "publication", styles["qa_head"])
-        # This box is a short preview near the top of the report, not the
-        # authoritative disclosure (that's the Sources section's data-gap
-        # box, and the full list is always in the run manifest) - so it
-        # stays capped for readability rather than growing with the finding
-        # count.
-        items = [
-            Paragraph(f"● <b>{_escape(finding.check)}</b> — {_escape(finding.message)}",
-                      styles["gap"])
-            for finding in warnings[:6]
-        ]
-        if len(warnings) > 6:
-            items.append(Paragraph(
-                f"● and {len(warnings) - 6} further warning(s); "
-                "see the run manifest.", styles["gap"]))
-        return self._qa_callout(heading, items, styles)
 
     def _qa_callout(self, heading: Paragraph, items: list, styles) -> Table:
         """Shared warning-box visual language: tint + left accent bar.

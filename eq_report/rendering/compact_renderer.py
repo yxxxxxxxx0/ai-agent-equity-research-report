@@ -77,7 +77,7 @@ def _overlaps(left: frozenset[str], right: frozenset[str]) -> bool:
 
 def _cited_text(text: str, refs: tuple[int, ...]) -> str:
     """Append the full report's stable source references to compact prose."""
-    return text + (" " + "".join(f"[{ref}]" for ref in refs) if refs else "")
+    return text + (" " + "".join(f"[{ref}]" for ref in sorted(set(refs))) if refs else "")
 
 
 def _bullets(c: Canvas, x: float, y: float, width: float, texts: list[str]) -> float:
@@ -245,9 +245,11 @@ def _table(c: Canvas, x: float, y: float, width: float, table: MetricTable) -> f
 _BLOCK_GAP = 12.0
 
 
-def _render_brief(draft: ReportDraft, output_pdf: Path, *, total_pages: int) -> list[int]:
+def _render_brief(draft: ReportDraft, output_pdf: Path, *, total_pages: int,
+                  max_bullets: int = 8) -> tuple[list[int], bool]:
     """Render page one as a brief in the full report's own house style; returns the
-    source numbers it cites (for the references page).
+    source numbers it cites (for the references page) and whether every block fit
+    above the footer - if not, the caller retries with a smaller ``max_bullets``.
 
     Laid out as a top-down flow of independent blocks rather than a fixed
     grid: a block with no supporting evidence is skipped entirely - no
@@ -335,11 +337,13 @@ def _render_brief(draft: ReportDraft, output_pdf: Path, *, total_pages: int) -> 
     financial_table = financial.tables[0] if financial and financial.tables else None
     metric_notes = [_cited_text(s.text, s.citation_refs)
                     for s in (drivers.statements[:3] if drivers else ())]
-    financial_text = " ".join(filter(None, [
+    # One bullet per point: the financial standfirst, the first financial
+    # statements, then the operating drivers behind them.
+    financial_texts = [t for t in [
         _cited_text(financial.summary, financial.summary_citation_refs) if financial else "",
-        _cited_text(financial.statements[0].text, financial.statements[0].citation_refs)
-        if financial and financial.statements else "",
-    ]))
+        *(_cited_text(s.text, s.citation_refs) for s in (financial.statements[:3] if financial else ())),
+        *metric_notes,
+    ] if t]
     competitive_texts = [t for t in [
         _cited_text(competitive.summary, competitive.summary_citation_refs) if competitive else "",
         _cited_text(competitive.statements[0].text, competitive.statements[0].citation_refs)
@@ -356,9 +360,12 @@ def _render_brief(draft: ReportDraft, output_pdf: Path, *, total_pages: int) -> 
     recent_texts = [_cited_text(s.text, s.citation_refs)
                     for s in (recent.statements[:2] if recent else ())]
 
+    intro_texts, snapshot_texts = intro_texts[:max_bullets], snapshot_texts[:max_bullets]
+    financial_texts = financial_texts[:max_bullets]
+
     shown = [
         t for t in intro_texts + snapshot_texts + metric_notes + competitive_texts
-        + risk_texts + watch_texts + recent_texts + [financial_text] if t
+        + risk_texts + watch_texts + recent_texts + financial_texts if t
     ]
     fingerprints = [claim_fingerprint(t) for t in shown]
 
@@ -401,31 +408,21 @@ def _render_brief(draft: ReportDraft, output_pdf: Path, *, total_pages: int) -> 
     )
 
     def draw_financial_metrics(x: float, yy: float, w: float) -> None:
-        table_bottom = _table(c, x, yy, w, financial_table) if financial_table else yy
-        if metric_notes:
-            _bullets(c, x, table_bottom - 5 if financial_table else table_bottom, w, metric_notes)
-
-    def draw_financial_narrative(x: float, yy: float, w: float) -> None:
-        _paragraph(c, x, yy, w, financial_text, size=BODY_SIZE, leading=BODY_LEADING)
+        _table(c, x, yy, w, financial_table)
 
     table_h = _table_block_height(financial_table)
-    notes_h = _bullet_lines_height(metric_notes, col_inner)
-    financial_metrics_h = (table_h + (5 if table_h and notes_h else 0) + notes_h + _CARD_PAD
-                           if (table_h or notes_h) else 0.0)
-    financial_narrative_h = _paragraph_block_height(financial_text, col_inner)
+    financial_metrics_h = table_h + _CARD_PAD if table_h else 0.0
     # A lone survivor renders full width, so size it for that width instead.
-    if not financial_narrative_h and financial_metrics_h:
-        notes_h = _bullet_lines_height(metric_notes, full_inner)
-        financial_metrics_h = table_h + (5 if table_h and notes_h else 0) + notes_h + _CARD_PAD
-    if not financial_metrics_h and financial_narrative_h:
-        financial_narrative_h = _paragraph_block_height(financial_text, full_inner)
+    bullets_w = col_inner if financial_metrics_h else full_inner
     y = draw_pair(
         y, "Key Financial Metrics", financial_metrics_h, draw_financial_metrics,
-        "Financial Performance & Operating Drivers", financial_narrative_h, draw_financial_narrative,
+        "Financial Performance & Operating Drivers",
+        _bullet_block_height(financial_texts, bullets_w),
+        lambda x, yy, w: _bullets(c, x, yy, w, financial_texts),
     )
 
-    competitive_risk_texts = competitive_texts + risk_texts
-    watch_recent_texts = watch_texts + recent_texts
+    competitive_risk_texts = (competitive_texts + risk_texts)[:max_bullets]
+    watch_recent_texts = (watch_texts + recent_texts)[:max_bullets]
     both = bool(competitive_risk_texts) and bool(watch_recent_texts)
     pair_w = col_inner if both else full_inner
     y = draw_pair(
@@ -440,6 +437,7 @@ def _render_brief(draft: ReportDraft, output_pdf: Path, *, total_pages: int) -> 
 
     # Fill the remaining page only with points that fit entirely in the box.
     bottom = 40.0
+    fits = y + _BLOCK_GAP >= bottom
     available = y - _BAR_H - bottom
     fitted: list[str] = []
     for text in candidates:
@@ -453,7 +451,17 @@ def _render_brief(draft: ReportDraft, output_pdf: Path, *, total_pages: int) -> 
 
     footer(c, page_w, f"Page 1 of {total_pages} | Compact version of the full structured report")
     c.save()
-    return sorted({int(n) for text in shown + fitted for n in re.findall(r"\[(\d+)\]", text)})
+    refs = sorted({int(n) for text in shown + fitted for n in re.findall(r"\[(\d+)\]", text)})
+    return refs, fits
+
+
+def _fit_brief(draft: ReportDraft, output_pdf: Path, *, total_pages: int) -> list[int]:
+    """Render page one, trimming bullets per block until nothing runs into the footer."""
+    for limit in range(8, 0, -1):
+        refs, fits = _render_brief(draft, output_pdf, total_pages=total_pages, max_bullets=limit)
+        if fits:
+            break
+    return refs
 
 
 _REF_SIZE, _REF_LEADING, _REF_URL_LEADING = 8.6, 11.5, 9.5
@@ -561,7 +569,7 @@ def render_compact_report(
     try:
         # Pass 1 finds which sources the brief cites; pass 2 draws it with the
         # true page count once the appendix and references are known.
-        refs = _render_brief(draft, brief_pdf, total_pages=1)
+        refs = _fit_brief(draft, brief_pdf, total_pages=1)
         pages = _reference_pages(draft, refs)
         has_appendix = True
         try:
@@ -577,7 +585,7 @@ def render_compact_report(
                 type(exc).__name__, exc,
             )
         total = 1 + has_appendix + len(pages)
-        _render_brief(draft, brief_pdf, total_pages=total)
+        _fit_brief(draft, brief_pdf, total_pages=total)
         if pages:
             _render_references(draft, pages, refs_pdf, first_page=2 + has_appendix, total_pages=total)
             parts.append(refs_pdf)

@@ -44,7 +44,7 @@ class CitationRegistry:
             self._numbers[evidence_id] = number
             self._citations.append(self._citation(number, item))
             refs.append(number)
-        return tuple(dict.fromkeys(refs))
+        return tuple(sorted(set(refs)))
 
     @staticmethod
     def _citation(number: int, item: EvidenceItem) -> Citation:
