@@ -1,80 +1,146 @@
-# Automated Equity Research Report Generation
+# Equity Research Studio
 
-A local, end-to-end prototype that turns a research request into a draft equity
-research PDF. The core stack is **Python, standard-library dataclasses for the
-typed models, SQLite for the Evidence Store, `reportlab` for the PDF**.
+An end-to-end, LLM-assisted equity research report generator. Give it a ticker and
+it plans the research, pulls market, fundamentals and filings data, turns it into a
+provenance-tracked evidence store, runs reproducible analytics, drafts a neutral and
+fully cited report, checks every claim against its source, repairs what fails, and
+renders PDFs. A local web UI runs it, shows progress live, and reports what QA found.
 
-All normal acquisition branches use MegadataAPI. There is no mock or synthetic
-data fallback: if MegadataAPI is missing or unavailable, the run records the
-acquisition failure. An optional, separately disclosed web gap-fill stage may
-search reputable public sources for thin narrative sections; every accepted
-web claim retains its exact URL and is reverified before publication.
+**Stack:** Python 3.11+, SQLite (Evidence Store), ReportLab (PDF), Flask (web UI),
+OpenRouter (LLMs), MegadataAPI (data).
 
-```bash
-pip install -r requirements.txt
-python -m eq_report --ticker NVDA --report-date 2026-09-02
-```
+**What a run produces**
 
-> The report is a neutral analysis, not investment research: no
-> Buy/Hold/Sell view, no price target, no bull/base/bear thesis, and no claim
-> that a valuation is justified or unjustified - see "Neutral wording and
-> analytical discipline" below for how that is enforced.
+| Output | What it is |
+|---|---|
+| Full report PDF | The complete narrative report, with the technical appendix appended when market data allows |
+| Compact report PDF | Page 1 brief, page 2 technical dashboard, page 3 the sources the brief cites |
+| Report JSON + QA files | The structured report, every QA finding, and the repair log |
+| Run manifest | Stage timings, LLM cost and tokens per stage, warnings and errors |
 
-Planning, the segment agents, synthesis and QA can use a **GPT-backed model
-called through OpenRouter** whenever `EQR_MODEL_API_KEY` is set (see section
-5a); each keeps its deterministic logic as the verifier and as the fallback
-when a call fails. Some segments can be pinned to their rule-based agent with
-`EQR_DETERMINISTIC_SEGMENTS`. The Evidence Store, the Analytics Engine, the QA
-publication verdict and rendering are deterministic code, and a model never
-sets a stored value: normalisation accepts an LLM-rewritten value only after
-code verifies it, and QA triage can only downgrade a heuristic finding when
-code confirms the figure against the Evidence Store. With no API key the
-pipeline is fully deterministic and has zero model API cost.
-
-### Current publication guarantees
-
-- Every factual sentence maps internally to specific `evidence_id` rows and/or
-  a deterministic calculation whose inputs map to evidence.
-- Merely attaching a related citation is insufficient. Semantic QA compares
-  each claim with its mapped source material and blocks publication when the
-  source does not support the entity, period, number, direction, comparison,
-  causality or conclusion.
-- Cited evidence must be validated and retain a publisher URL, source URL or
-  provider retrieval URL. A provider name by itself is not traceability.
-- Unsupported free-form narrative is not published. Missing information is
-  disclosed as a gap or omitted with a recorded reason.
-- Primary filings and company releases are preferred. Web-derived claims keep
-  their original URL and are reverified; syndicated analysis or opinion is not
-  silently treated as equivalent to a primary source.
-
-The first accepted layout baseline is tagged `first-acceptable-baseline`
-(`5d16a7f`). Source-traceability enforcement starts at `39610a1`, and semantic
-claim-to-source verification at `03fea33`.
+> The report is a neutral analysis, not investment research: no Buy/Hold/Sell view,
+> no price target, and no claim that a valuation is justified or unjustified.
 
 ---
 
-## 1. Architecture implemented
+## 1. Quick start
 
-The target architecture is preserved as one module per stage. No stage reaches
-around another.
+```bash
+pip install -r requirements.txt
+cp .env.example .env        # then edit .env (see section 3)
+python webui/app.py         # then open http://127.0.0.1:5050
+```
+
+You need two things in `.env`:
+
+1. **`EQR_MODEL_API_KEY`**: an OpenRouter key. A run will not start without one.
+2. **`EQR_MEGADATA_BASE_URL`** plus credentials (`EQR_MEGADATA_USERNAME` and
+   `EQR_MEGADATA_PASSWORD`, or `EQR_MEGADATA_API_KEY`). MegadataAPI is the only data
+   provider, and there is no mock or fallback data.
+
+---
+
+## 2. Using the web UI
+
+Start it with `python webui/app.py` and open **http://127.0.0.1:5050**. Stop it with
+`Ctrl+C` in the terminal. Jobs live in the server's memory, so restarting the server
+clears the page; the finished files stay on disk (see section 6).
+
+**Generate a report**
+
+1. **Enter a ticker** in box 1, for example `NVDA`, `AAPL` or `TSLA`.
+2. **Choose a model** in the *Model* dropdown. It lists curated OpenRouter models with
+   live prices per 1M tokens. Your `.env` model is marked *(default)*. Pick
+   *Custom model id…* to type any exact OpenRouter id (for example
+   `openai/gpt-5.6-sol`); an id OpenRouter does not list is rejected. The chosen model
+   is used for **every** LLM stage of that run. A stronger model writes better but costs
+   more; the price line under the dropdown shows the trade-off.
+3. Click **Generate Reports**. The model dropdown locks until the run finishes. A run
+   typically takes several minutes.
+
+**Watch it run**
+
+- **Stat cards** at the top show elapsed time, LLM cost so far, tokens, and the model in use.
+- **2. Generating Reports** is a five-step tracker with a timer on each step.
+- **Workflow map** (bottom of the page) shows the real pipeline. Nodes turn green when
+  done and pulse orange while running; each shows its time and, for LLM stages, its cost.
+  The QA gate branches three ways: *critical* findings go to the repair loop, which sends
+  a repaired draft back for a *re-check*; findings that stay *unfixed* lead to **Blocked**
+  (no PDF); a draft that *clears QA* goes on to the two PDFs.
+
+**Read the result**
+
+- **3. Report Viewer**: switch between **Full Report** and **Compact Report**. If QA blocked the
+  run, the viewer says so instead of showing a PDF.
+- **4. QA review** fills in when QA finishes (including for blocked runs):
+  - badges for critical, warnings, info and repaired counts;
+  - **Critical findings** and **Warnings**: the check name, section, message, and the
+    sentence it concerns;
+  - **Info**: minor notes, collapsed by default;
+  - **Repairs made during QA**: each statement that was rewritten or dropped, with the
+    original and rewritten text;
+  - **Pipeline notices**: run warnings and errors, for example a technical appendix that
+    could not be built.
+
+**Resume a previous run**: click *Resume a previous run instead*, paste a run id such as
+`run_20260929T060809_f9cebb` (the folder name under `output_webui/runs/`), and press
+*Resume*. It re-runs analysis, synthesis, QA and rendering from that run's saved plan and
+evidence, so there is no new planning or data acquisition. It is useful for retrying after
+a QA block without re-fetching data.
+
+**Tips**
+
+- Compare models by running the same ticker twice with different choices and checking cost,
+  time and the QA review.
+- If a run fails immediately, the viewer shows the error. The most common causes are in
+  section 8.
+
+---
+
+## 3. Configuration (`.env`)
+
+The web UI loads `.env` automatically. Nothing outside `eq_report/config.py` reads the
+environment, and credentials are never logged.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `EQR_MODEL_API_KEY` | none | **Required.** OpenRouter key (or set `OPENROUTER_API_KEY`) |
+| `EQR_MODEL_NAME` | `openai/gpt-5` | Default model for every LLM stage (the web UI can override it per run) |
+| `EQR_MODEL_NAME_AGENTS` | unset | Optional separate, cheaper model for the segment agents only |
+| `EQR_MODEL_MAX_TOKENS` / `_TEMPERATURE` | 16000 / 0.0 | Model call limits |
+| `EQR_MEGADATA_BASE_URL` | none | MegadataAPI address |
+| `EQR_MEGADATA_USERNAME` / `_PASSWORD` or `_API_KEY` | none | MegadataAPI credentials |
+| `EQR_DETERMINISTIC_SEGMENTS` | four fact-heavy segments | Segments written by rule-based agents instead of the LLM (set to empty to use the LLM everywhere) |
+| `EQR_QA_AUTO_REPAIR` / `_MAX_ATTEMPTS` | true / 2 | Same-run repair of statements QA rejects |
+| `EQR_QA_TRIAGE` | `shadow` | `off`, `shadow` (log only) or `on` (downgrade confirmed false positives) |
+| `EQR_WEB_FILL_GAPS` | false | Search reputable public sources to fill thin sections; every claim is verified again before publication |
+| `EQR_VERIFY_METRIC_CONFLICTS` | false | Resolve conflicting source values using dated web sources |
+| `EQR_CHECK_DATA_FRESHNESS` | false | Check whether a newer reported period exists |
+| `EQR_OUTPUT_DIR` / `EQR_DB_PATH` | `output` | Where run files and the Evidence Store go |
+
+`.env.example` lists every setting with comments.
+
+---
+
+## 4. How the pipeline works
 
 ```
                                  ResearchRequest
                                         │
-                              ResearchPlanner  ── ResearchPlan (typed)
+                              ResearchPlanner  ── ResearchPlan
                                         │
                  ┌──────────────────────┼──────────────────────┐
                  ▼                      ▼                      ▼
-        MarketDataService      FundamentalsService      DocumentsService     ← asyncio.gather
-        (Megadata only)        (RawObservation)      (RawDocumentPassage)
+        MarketDataService      FundamentalsService      DocumentsService     ← concurrent
+        (MegadataAPI)          (RawObservation)      (RawDocumentPassage)
                  └──────────────────────┼──────────────────────┘
                                         ▼
                               Normalisation layer
                               1. deterministic parsers (authoritative)
-                              2. LLM maps unknown metric names (vocab-constrained)
+                              2. LLM maps unknown metric names (vocabulary-constrained)
                               3. LLM rescue for rejected values: quoted span,
-                                 digits x known scale, sign, two runs agree
-                              4. leftovers -> Rejection (data gap), never coerced
+                                 digits × known scale, sign, two runs agree
+                              4. leftovers → Rejection (a data gap), never coerced
                                         ▼
                         ╔═══════════════════════════╗
                         ║   Evidence Store (SQLite) ║      ← THE BOUNDARY
@@ -83,341 +149,113 @@ around another.
                           EvidenceReader (read-only)
                  ┌──────────────────────┴──────────────────────┐
                  ▼                                             ▼
-        AnalyticsEngine                              8 Segment Agents        ← asyncio.gather
-        (pure functions; LLM only                    (LLM, or rule-based for
-         cross-checks, never sets                     EQR_DETERMINISTIC_SEGMENTS)
-         a value)
+        AnalyticsEngine                              8 Segment Agents        ← concurrent
+        (pure functions; the LLM only               (LLM, or rule-based for
+         cross-checks, never sets a value)            EQR_DETERMINISTIC_SEGMENTS)
                  └──────────────────────┬──────────────────────┘
                                         ▼
-                              Synthesis layer  ── ReportDraft (typed)
+                              Synthesis ── ReportDraft (typed)
                                         ▼
         ┌───────────────────────────  QA GATE  ───────────────────────────┐
-        │ deterministic checks -> claim entailment (LLM) -> QA auditor ->  │
+        │ deterministic checks → claim entailment (LLM) → QA auditor →     │
         │ triage of the 2 heuristic number checks (EQR_QA_TRIAGE)          │
-        │                       -> QAResult                                │
+        │                        → QAResult                                │
         └──────────────┬───────────────────────────────────▲──────────────┘
               critical findings?                            │ repaired draft
               │                 │ none                      │ re-runs the whole gate
               ▼                 │                           │
         QA repair loop ─────────┼───────────────────────────┘
-        1. LLM rewrite by subtraction (<=2 attempts; may not add a figure)
-        2. deterministic omit of a still-failing statement (<=3 rounds)
-        3. tidy_draft (repeats, empty sections)
+        1. LLM rewrite by subtraction (≤2 attempts; may not add a figure)
+        2. deterministic omit of a still-failing statement (≤3 rounds)
+        3. tidy (repeats, empty sections), then one more repair pass
               │ still critical               │ no critical (warnings never block)
               ▼                              ▼
-     no PDF, validation_failure.json    PdfReportRenderer + compact renderer
-                                          (+ technical appendix merge)
+     no PDF, validation_failure.json    Full PDF + compact PDF (+ technical appendix)
                                                      ▼
-                                            PDF + report JSON + run manifest
+                                      PDFs + report JSON + run manifest
 ```
 
-Whichever mode is active, the Analytics Engine and Evidence Store are never
-touched by a model: an LLM-backed agent or synthesizer may only *select and
-phrase* what to say, and only by citing `evidence_id`/`analytics_id` values it
-was actually shown — any claim citing an unknown or missing id is dropped, not
-trusted (`agents/llm_agent.py::_result_from_model`,
-`synthesis/llm_synthesizer.py::_findings_from_model`). This is testable
-end-to-end: running the same request once with the model off and once with it
-on and diffing `04_analytics.json` between the two runs should show zero
-numeric differences, since both paths compute analytics from the same
-Evidence Store — only the narrative differs.
+**Stages**
 
-The **Evidence Store is a hard boundary**. The Analytics Engine and every
-segment agent are constructed with an `EvidenceReader` and nothing else — no
-provider, no HTTP client, no `requests` import anywhere downstream of it. The
-architecture the spec forbids (`Segment Agent → external API → unsupported
-claim`) is not merely discouraged here; there is no object in scope that could
-do it.
+| # | Stage | Result | File |
+|---|---|---|---|
+| 1 | Planning | research questions, required metrics, 8 segment tasks | `01_plan.json` |
+| 2 | Acquisition | raw data from three concurrent branches | `02_acquisition.json` |
+| 3 | Normalisation | canonical `EvidenceItem`s plus a rejection list | `03_normalisation.json` |
+| 4 | Evidence Store | SQLite, read through `EvidenceReader` | `output/evidence.sqlite3` (`EQR_DB_PATH`) |
+| 5 | Analytics | each number with its formula and input evidence ids | `04_analytics.json` |
+| 6 | Segment agents | findings per segment, each citing evidence ids | `05_segments.json` |
+| 7 | Synthesis | the structured `ReportDraft` | `06_report_draft_initial.json` |
+| 8 | QA gate and repair | findings, repair log, repaired draft | `07_qa.json`, `07_qa_repair.json`, `06_report_draft.json` |
+| 9 | Render | full PDF, compact PDF, technical appendix | PDFs, `report_<id>.json` |
+| 10 | Tracking | timings, cost, tokens, warnings | `run_<id>.json` |
 
-**Claim-to-source map.** Every printed factual sentence has its own lineage.
-This is an internal support map, not a requirement that source prose be copied
-into the report:
+**Guarantees**
 
-```
-Statement.text
-  ├── claim_type          reported | management | market expectation | calculated | interpretation
-  ├── citation_refs       [1][2]  →  Citation  →  evidence_id  →  EvidenceItem  →  source_name/url
-  ├── evidence_ids        →  EvidenceItem.raw_metric / raw_value (what the provider literally said)
-  └── analytics_ids       →  AnalyticsResult.formula + inputs + input_evidence_ids  →  EvidenceItem
-```
-
-Deterministic checks walk that chain for every statement and section summary.
-When a model is configured, `qa/entailment.py` performs the separate semantic
-test: it verifies that the mapped material actually supports the complete
-wording. Tests include a negative case where a real SEC citation says `$1B`
-but the report says `$2B`; the claim is correctly blocked.
+- **Every sentence traces to evidence.** Each statement carries the evidence ids and analytics
+  ids it rests on; each analytic carries its formula and input evidence ids.
+- **A model never sets a stored value.** Agents and synthesis may only cite ids they were shown
+  (anything else is dropped). Normalisation accepts an LLM-rewritten value only after code
+  verifies it. QA triage can only downgrade a finding when code confirms the figure against
+  the Evidence Store.
+- **The Evidence Store is a hard boundary.** Analytics and agents receive a read-only reader and
+  nothing else: no provider, no HTTP client.
+- **Deterministic QA decides publication.** Critical findings block the PDFs. The model can
+  propose a rewrite, but it cannot suppress a deterministic finding.
 
 ---
 
-## 2. Directory structure
+## 5. The QA gate in detail
 
-```
-eq_report/
-├── config.py                    # all env-var reading; the only place credentials are read
-├── errors.py                    # typed exceptions + PipelineError (structured, recorded)
-├── logging_setup.py             # structured logging, run_id + stage on every record
-├── cli.py / __main__.py         # entry point
-│
-├── domain/                      # stage-agnostic typed models (frozen dataclasses)
-│   ├── enums.py                 #   controlled vocabularies: SourceType, ClaimType, Severity, …
-│   ├── request.py               # 1. ResearchRequest
-│   ├── plan.py                  # 2. ResearchPlan, ResearchQuestion, SegmentTask, DocumentRequirement
-│   ├── observation.py           # 3. RawObservation, RawDocumentPassage, SourceRef, ProviderResult
-│   ├── evidence.py              # 5. EvidenceItem, FiscalPeriod
-│   ├── analytics.py             # 6. AnalyticsResult, AnalyticsBundle
-│   ├── segment.py               # 7. SegmentResult, KeyFinding, MetricHighlight, DataGap
-│   ├── report.py                # 8. ReportDraft, ReportSectionDraft, Statement, Citation, ChartSpec
-│   ├── qa.py                    # 9. QAResult, QAFinding
-│   └── run.py                   # 12. ReportRun, StageTiming
-│
-├── planning/
-│   ├── research_planner.py          # 2. request → plan. Performs no research. GPT plan via
-│   │                                 #   OpenRouter when EQR_MODEL_API_KEY is set.
-│   └── openrouter_client.py         #   OpenRouter chat-completions client for the planner
-│
-├── llm/client.py                    #   generic OpenRouter JSON-mode client, shared by the
-│                                     #   segment agents and synthesis
-│                                     #   resolution — output validated, never trusted directly
-│
-├── providers/                       # 3. acquisition interfaces + implementations
-│   ├── base.py                      #   DataProvider / MarketData / Fundamentals / Documents ABCs
-│   ├── registry.py                  #   Megadata-only selection, no data fallback
-│   └── megadata.py                  #   all three real-data branches
-│
-├── acquisition/services.py          # 3. three branches, run concurrently, never raise
-│
-├── normalisation/
-│   ├── canonical_metrics.py         # 4. alias table, metric properties, display labels
-│   ├── units.py                     # 4. number/currency/percent parsing and formatting
-│   ├── dates.py                     # 4. date + fiscal-period canonicalisation and arithmetic
-│   └── normalizer.py                # 4. raw → EvidenceItem, with rejections
-│
-├── evidence/
-│   ├── store.py                     # 5. SQLite store + EvidenceQuery (all required dimensions)
-│   └── reader.py                    # 5. read-only, run-scoped view handed downstream
-│
-├── analytics/
-│   ├── calculations.py              # 6. pure functions — no I/O, independently testable
-│   └── engine.py                    # 6. evidence → AnalyticsResult, with evidence ids
-│
-├── agents/
-│   ├── base.py                      # 7. SegmentAgent ABC, AgentContext, shared helpers
-│   ├── runner.py                    # 7. plan-driven construction + concurrent execution;
-│   │                                 #   picks LLMSegmentAgent for every segment when
-│   │                                 #   EQR_MODEL_USE_FOR_AGENTS=true, else the deterministic ones
-│   ├── llm_agent.py                 # 7. generic evidence-tagged GPT agent for any one segment
-│   └── company_snapshot.py · financial_performance.py · operating_drivers.py
-│       recent_developments.py · valuation.py · competitive_landscape.py
-│       risks_catalysts.py · what_matters_next.py
-│
-├── synthesis/
-│   ├── synthesizer.py               # 8. segment results → ReportDraft
-│   ├── llm_synthesizer.py           # 8. GPT-selected Key Takeaways when
-│   │                                 #   EQR_MODEL_USE_FOR_SYNTHESIS=true; every other section
-│   │                                 #   inherited unchanged from Synthesizer
-│   ├── terminology.py               # 8. house style + near-duplicate fingerprinting
-│   └── citations.py                 # 8. reference numbering, first-use order
-│
-├── qa/
-│   ├── checks.py                    # 9. deterministic evidence, numeric and narrative checks
-│   ├── entailment.py                # 9. semantic claim-to-mapped-source verification
-│   ├── web_claim_auditor.py         # 9. pre-publication web-source re-verification
-│   └── engine.py                    # 9. orchestrates QA; critical findings block publication
-│
-├── rendering/
-│   ├── pdf_renderer.py              # 10. consumes ReportDraft; computes nothing
-│   ├── compact_renderer.py          # 10. sourced compact page + technical dashboard
-│   ├── technical_appendix.py        # 10. live OHLCV technical charts
-│   └── json_writer.py               # 10. report JSON + run manifest
-│
-└── pipeline/
-    ├── orchestrator.py              # 11. generate_report() — the single entry point
-    └── run_tracker.py               # 12. ReportRun assembly and stage timing
+- **Deterministic checks** (about 25): every cited id exists, every analytic is recomputed from
+  its stored formula, units and percentages are right, periods and currencies agree, no
+  evidence is dated after the report, and requested sections are present.
+- **Claim entailment** (LLM): each sentence must be fully supported by the excerpts mapped to it,
+  not merely related. A mismatch is critical.
+- **QA auditor** (LLM): classifies whether conflicting values are the same fact or different
+  definitions.
+- **Triage** (`EQR_QA_TRIAGE`): only `evidence.no_unsupported_numbers` and
+  `evidence.numeric_claim_not_canonical` are eligible. The model says what metric and period each
+  figure is, code compares it with the Evidence Store, and only if every figure matches in two
+  runs can the finding drop from critical to warning. `shadow` mode logs without changing anything.
+- **Repair loop:** only critical findings are repaired. The LLM may trim a statement but cannot
+  add a figure; a statement that still fails is dropped; every step re-runs the full gate, and
+  the last result decides publication. Problems that are not tied to one sentence (corrupt
+  analytics, mixed company identity, contradictory primary facts) stay hard blocks.
 
-webui/app.py      local web UI: ticker + model picker, live workflow map, QA review
-output/runs/<id>/ per-run artefacts (see §4)
-```
+Warnings never block and are not fed back. They appear in the web UI's QA review section.
 
 ---
 
-## 3. Important design decisions
+## 6. Where the files go
 
-**Deterministic segment agents by default; GPT is a config-toggled swap.** Each
-deterministic agent composes findings from evidence and analytics by explicit
-rule, with no model call, which makes "agents must not invent facts"
-*structural* rather than a matter of prompt discipline. `SegmentAgent` is an
-ABC returning `SegmentResult`; `LLMSegmentAgent` (`agents/llm_agent.py`) is the
-alternative implementation used for every segment when
-`EQR_MODEL_USE_FOR_AGENTS=true` — it gets the same guarantee through
-post-hoc validation instead of structure: any claim whose cited
-`evidence_id`/`analytics_id` doesn't resolve against what it was actually shown
-is dropped, never trusted. Key Takeaways synthesis has the same pair
-(`Synthesizer` / `LLMSynthesizer`), toggled by `EQR_MODEL_USE_FOR_SYNTHESIS`.
+The web UI writes each run to `output_webui/runs/<run_id>/`; the command line writes to
+`EQR_OUTPUT_DIR/runs/<run_id>/` (default `output/runs/`). A run folder contains the stage files
+from section 4, plus:
 
-**No LLM in the Analytics Engine, ever — no config toggle exists for it.**
-Every number is computed by a pure function in `analytics/calculations.py`, and
-the QA layer *re-derives* each one through a second explicit dispatch on the
-stored formula string (`qa/checks.py::_recompute`). Tampering with a stored
-value fails QA. This holds whether or not the segment agents or synthesis are
-running on GPT — neither ever writes to the Evidence Store or the analytics
-bundle, only reads from them.
+- `<TICKER>_<date>_<run>.pdf` (full report), `..._with_technical_appendix.pdf`, and
+  `..._compact_two_page.pdf` (compact report);
+- `validation_failure.json` when QA blocked publication, listing the required fixes.
 
-**Rejection over coercion.** `units.parse_number` raises `NormalisationError`
-for `None`, `""`, `"n/a"`, `True`, `NaN`, `"12.5 zorkmids"`. The normaliser
-catches it, records a `Rejection` with a reason, and the value never becomes
-evidence. Twelve parametrised cases cover this. (`"31.4x"` — a multiple written
-the way it conventionally is — used to be one of the false-positive
-rejections: `parse_number` treated the trailing `x` as an unrecognised
-magnitude suffix rather than the identity scale a multiple needs. Provider
-payloads may return multiples in the conventional suffixed form. Fixed in
-`units._SCALE_SUFFIXES`.)
-
-**Exhibits are built centrally, not per agent.** `LLMSegmentAgent`'s
-retrieved-evidence pool (point metrics, period metrics, segment/KPI rows,
-guidance, peer values, matching documents) is deliberately broad and largely
-the *same* broad pool for every one of the 8 segments — a segment only differs
-in which findings and headline the model chooses to write from it. Earlier
-versions rendered each section's table from that pool, so the report printed
-much the same twenty metrics in seven near-identical tables, with a
-`Comparison` column that was empty in every row because nothing ever filled it.
-Tables and charts are now built once by `synthesis/exhibits.py` from the
-Evidence Store, on three rules: one exhibit per question (what the quarter
-delivered, where the revenue comes from, how it compares with peers), so no
-figure is printed twice; growth/mix/surprise columns are filled from the
-Analytics Engine, which had already computed them; and an exhibit whose
-evidence is missing is not drawn at all. `important_metrics` remains on the
-`SegmentResult` and in the run JSON as the record of what each agent judged
-material.
-
-**The first page carries a data panel.** `synthesis/key_data.py` builds the
-company's headline figures — market data, valuation, the last reported quarter,
-guidance — and the renderer sets them in a right-hand column beside the opening
-section, as a sell-side first page does. Key Takeaways is hoisted to lead so
-the reader meets the argument and the figures behind it together. Because the
-panel states the price, scale and multiples, no body table has to repeat them.
-
-**The report's shape follows the evidence.** The plan lists the sections a
-reader asked about; `Synthesizer._prune` decides which of them earned a
-heading. A section with fewer than two statements and no exhibit is folded into
-its sibling where one is defined (catalysts into risks, retitled "Risks and
-Catalysts") and otherwise dropped. Every omission is recorded on
-`ReportDraft.metadata["sections_omitted"]` with its reason, printed in the back
-matter, and checked by QA: an omission *with* a recorded reason is a disclosed
-editorial decision (WARNING), while a section that vanished with no reason
-recorded is still CRITICAL, because that is the signature of a section lost by
-accident rather than dropped on purpose.
-
-**A column has to earn its place.** The renderer drops any table column no row
-filled (`pdf_renderer.py::_metric_table`). Emptiness is decided at render time
-rather than upstream because it is a presentation question: synthesis is
-entitled to ask for a "vs consensus" column and leave it blank where no
-consensus exists, and a column of blanks reads as missing data rather than as
-a question the report did not need to ask.
-
-**Raw values are never destroyed.** `EvidenceItem.raw_metric` and `raw_value`
-keep what the provider literally said (`"$62,300,000,000"`, `"totalRevenue"`)
-alongside the normalised `62300000000.0` / `revenue`.
-
-**Deterministic evidence ids.** `make_evidence_id` is a hash of
-(run, entity, metric, period, date, source, discriminator) rather than a UUID.
-Re-running over the same inputs yields the same ids, which makes diffing two
-report runs and debugging a citation tractable. Exact duplicates collapse.
-
-**Metric identity beats vendor unit strings.** A gross margin is a percentage
-whatever the vendor called it; a margin *change* is percentage points and is
-differenced, never divided (−0.9pp, not −1.2%). QA enforces both.
-
-**"Latest period" means latest *reported* period.** Guidance and consensus rows
-legitimately carry future periods, so `latest_reported_period()` is defined by
-reported fundamentals, not by the maximum date in the table. Getting this wrong
-would have anchored the whole report on a guided quarter.
-
-**Duplicate detection is scoped to the report body.** Key Takeaways is a summary
-layer and is *expected* to restate a body claim, so it renders against its own
-discarded scope. Suppressing a body claim because the summary made it would gut
-the detail sections. QA's duplication check skips Key Takeaways for the same
-reason.
-
-**One agent, two sections.** The risk/catalyst agent tags its findings `risk` /
-`catalyst` and writes a narrative for each; the synthesis layer splits them.
-
-**No synthetic fallback.** Provider failure is retained as a structured
-acquisition error. The pipeline never substitutes generated sample values.
-
-**Failure policy.** Recoverable problems become `PipelineError` records attached
-to the run; only an unrecoverable stage failure raises. A provider that throws
-is trapped by `DataProvider.fetch` and returned as a `FAILED` `ProviderResult`.
-A branch that dies does not stop the run — the loss surfaces as data gaps.
+A run that fails QA still writes the draft, QA result and manifest; only the PDFs are withheld.
 
 ---
 
-## 4. How data flows, stage by stage
+## 7. Command line
 
-| Stage | Input → Output | Where it lands on disk |
-|---|---|---|
-| 1. Request | free text or JSON → `ResearchRequest` | `run.request` in the manifest |
-| 2. Planner | `ResearchRequest` → `ResearchPlan` (questions, required metrics/documents/analytics, 8 segment tasks, source priorities) | `01_plan.json` |
-| 3. Acquisition | `ResearchPlan` → 3 × `AcquisitionResult` **concurrently** (`asyncio.gather`), each with per-provider status, errors and warnings | `02_acquisition.json` |
-| 4. Normalisation | `RawObservation` / `RawDocumentPassage` → `EvidenceItem` + `Rejection` list; rejected numeric strings get one verified LLM rewrite (`normalisation/llm_rescue.py`, tagged `llm_rescued_value`) | `03_normalisation.json` (every evidence item, in full) |
-| 5. Evidence Store | `EvidenceItem` → SQLite; downstream gets `EvidenceReader` | `output/evidence.sqlite3` |
-| 6. Analytics | evidence → `AnalyticsResult` (value, unit, formula, inputs, `input_evidence_ids`) | `04_analytics.json` |
-| 7. Agents | plan + reader + analytics → 8 × `SegmentResult` **concurrently** | `05_segments.json` |
-| 8. Synthesis | segment results → `ReportDraft` (sections, statements, tables, charts, citations, gaps) | `06_report_draft.json` |
-| 9. QA gate + repair | `ReportDraft` → deterministic checks + semantic claim/source review + number-check triage → `QAResult`; critical findings go to the repair loop, whose output re-enters the gate | `07_qa.json`, `07_qa_repair.json`, `06_report_draft.json` (repaired) |
-| 10. Render | `ReportDraft` → full PDF, compact PDF, optional technical appendix and report JSON | `<TICKER>_<date>_<run>.pdf`, `..._compact_two_page.pdf`, `..._with_technical_appendix.pdf`, `report_<run>.json` |
-| 12. Tracking | everything above → `ReportRun` | `run_<run>.json` |
+The command line does **not** read `.env`, so set the variables in your shell first (or just use
+the web UI).
 
-Every intermediate object is dumped, so any stage can be inspected without
-re-running the pipeline. A run that fails QA still writes the draft, the QA
-result and the manifest — only the PDF is withheld.
-
-**The reasoning chain** is explicit in `synthesizer._TAKEAWAY_ORDER`: what
-changed → why → financial impact → surprise vs expectations → forward
-expectations → implication for the multiple → relative position → what could
-break it → what matters next.
-
-**QA repair loop and triage.** Only *critical* findings are repaired; warnings
-never block and are not fed back (exceptions: `tidy_draft` acts on duplication
-warnings, and triage can downgrade a false-positive critical to a warning).
-The loop lives in `pipeline/orchestrator.py` and `qa/repair.py`: up to
-`EQR_QA_AUTO_REPAIR_MAX_ATTEMPTS` (default 2) LLM rewrites that may only remove
-content, then up to 3 rounds of deterministic omission, then `tidy_draft`;
-every step re-runs the full gate, and the last `QAResult` alone decides
-publication. Non-local failures (corrupt analytics, mixed identity,
-contradictory primary facts) stay hard blocks. `qa/triage.py` covers only
-`evidence.no_unsupported_numbers` and `evidence.numeric_claim_not_canonical`:
-the LLM says which canonical metric/period each figure is, code compares it
-with the Evidence Store, and only if every figure matches in two runs can the
-finding drop from critical to warning. `EQR_QA_TRIAGE=off|shadow|on` (default
-`shadow`: log only, change nothing).
-
-**QA check families** (severity policy: `CRITICAL` blocks the PDF):
-
-- *Evidence* — referenced ids exist; no unsupported numbers; reference numbers resolve; weak-evidence-only claims flagged.
-- *Semantic support* — mapped evidence must support the complete wording, not
-  merely concern the same company or topic; an unsupported or unreviewed claim
-  is critical.
-- *Numerical* — every analytic independently recomputed; units known and semantically right; decimal-fraction-as-percentage detection.
-- *Temporal* — periods comparable; no observation dated after the report; the analysed period is named in prose.
-- *Consistency* — one name per ticker, one ticker per company, one currency; no contradictory values for the same metric and period (>1% spread is critical, rounding is a warning).
-- *Narrative* — requested sections present and populated; unsourced causal claims; verbatim duplication; undisclosed data gaps.
-
----
-
-## 5. How to run the prototype
-
-```bash
-pip install -r requirements.txt
-
-# ticker and report date
-python -m eq_report --ticker NVDA --report-date 2026-09-02
-
-# optional operational output location
-python -m eq_report --ticker NVDA --report-date 2026-09-02 --output-dir output
-
-# inspect the parsed request without running anything
-python -m eq_report "…" --print-request
+```powershell
+$env:EQR_MODEL_API_KEY = "sk-or-..."
+$env:EQR_MEGADATA_BASE_URL = "http://your-megadata-host:8080"
+$env:EQR_MEGADATA_USERNAME = "..." ; $env:EQR_MEGADATA_PASSWORD = "..."
+python -m eq_report --ticker NVDA --report-date 2026-09-30 --output-dir output
+python -m eq_report --resume run_20260929T060809_f9cebb     # re-run from saved evidence
+python -m eq_report --ticker NVDA --report-date 2026-09-30 --print-request   # inspect only
 ```
+
+The exit code is `0` on success and `1` if QA blocked the PDF or a stage failed.
 
 From Python:
 
@@ -430,256 +268,52 @@ result = asyncio.run(generate_report(request, Settings.from_env()))
 print(result.summary(), result.pdf_path)
 ```
 
-Configuration is entirely environment-driven — see `.env.example`. Nothing reads
-`os.environ` outside `config.py`, and `Settings.describe()` (what gets logged)
-reports only *whether* a credential is present, never its value; there is a test
-asserting that.
+---
 
-Exit code is `0` on success, `1` if QA blocked the PDF or a stage failed.
-Statement-scoped QA errors are repaired and rechecked automatically within the
-same run (see "QA repair loop and triage" in section 4 for the deterministic/LLM
-boundary and the remaining hard-block conditions).
+## 8. Troubleshooting
 
-### 5a. Optional GPT-backed stages (OpenRouter)
+| Symptom | Likely cause and fix |
+|---|---|
+| `LLM writing is required. Configure EQR_MODEL_API_KEY` | No OpenRouter key. Add `EQR_MODEL_API_KEY` to `.env` and restart the web UI. |
+| `OpenRouter planner did not return valid JSON` | The model's reply was empty or malformed. The planner retries once and accepts code-fenced JSON; if it still fails, the error shows the model, finish reason and the start of the reply. `finish_reason=length` means the model ran out of output tokens. Try a different model. |
+| Acquisition warnings or empty sections | MegadataAPI is unreachable or rejected the credentials. Check `EQR_MEGADATA_*`. The run continues, and the loss appears as data gaps. |
+| "Technical appendix could not be generated" | The market-data fetch failed. The compact report then has the brief and references only (2 pages). |
+| Report blocked by QA | Open the **QA review** section for the critical findings, then use **Resume** on that run id, or try a stronger model. |
+| Sections missing from the report | No validated evidence supported them. They are listed as omitted; turn on `EQR_WEB_FILL_GAPS` to try to fill thin sections from public sources. |
+| Page did not update after a restart | Jobs are in memory; start a new run or Resume the run id. |
 
-Every variable below is optional; leaving them all unset keeps the pipeline
-fully deterministic. Set them in `.env` (see `.env.example`) or as environment
-variables:
+---
 
-```bash
-EQR_MODEL_PROVIDER=openrouter
-EQR_MODEL_NAME=openai/gpt-5              # any OpenRouter chat-completions model
-EQR_MODEL_API_KEY=sk-or-v1-...           # or set OPENROUTER_API_KEY instead
-
-# Setting the key turns the model on for every LLM-capable stage.
-EQR_MODEL_NAME_AGENTS=                   # optional separate model for the segment agents
-EQR_DETERMINISTIC_SEGMENTS=company_snapshot,financial_performance,operating_drivers,market_commentary
-EQR_QA_TRIAGE=shadow                     # off | shadow (log only) | on (downgrade confirmed false positives)
-```
-
-Whichever stages are on, they only ever *select and phrase* — every claim they
-return must cite an `evidence_id`/`analytics_id` copied verbatim from the rows
-they were shown; anything else is dropped before it reaches the draft. A
-useful sanity check after enabling these: run the same request once with the
-variables unset and once with them set, then diff `04_analytics.json` between
-the two run directories — the values should be identical, since the Analytics
-Engine and Evidence Store are never in the model's path. A run's
-`run_<id>.json` manifest and stdout logs record which mode produced it;
-pass `EQR_LOG_JSON=true` to get per-call `input_tokens`/`output_tokens` in the
-log stream for cost tracking.
-
-### 5b. Data acquisition
-
-MegadataAPI is the sole acquisition provider for market data, fundamentals and
-documents. It is enabled by `EQR_MEGADATA_BASE_URL` and its Basic or Bearer
-credentials. Missing configuration, network failure or an empty response is
-recorded as an acquisition error; no synthetic data fallback runs. Optional
-web gap-fill is a separate, disclosed research stage and does not impersonate
-missing API data.
-
-### 5c. Full, compact and technical reports
-
-The full and compact reports share one `ReportDraft`:
-
-- The full PDF renders all surviving sourced sections, exhibits and the source
-  list.
-- Compact page 1 selects, shortens and rearranges existing full-report
-  summaries, statements and tables. It does not generate new company analysis,
-  and source markers are preserved when text is shortened.
-- Compact page 2 is the technical dashboard. It is generated separately from
-  live MegaAPI/Bloomberg OHLCV data, so it is not copied from the full report.
-- The full report with technical appendix combines the full narrative PDF with
-  that same independently generated dashboard.
-
-Section titles, layout labels and page footers are template text rather than
-company claims. Every factual compact-report bullet must map back to the same
-source-supported statement used by the full report.
-
-## 6. Example user request
-
-```json
-{
-  "company": "NVIDIA",
-  "ticker": "NVDA",
-  "objective": "company update",
-  "sections": ["company_snapshot", "key_takeaways", "recent_developments",
-               "financials", "operating_drivers", "competitive_landscape",
-               "valuation", "risks", "catalysts", "what_matters_next", "sources"],
-  "time_horizon": "latest",
-  "peers": [],
-  "focus": ["data centre demand", "gross margin trajectory"],
-  "report_date": "2026-09-02"
-}
-```
-
-Only `company` is mandatory. The planner resolved `NVDA` from the name and
-applied the default peer set `AMD, INTC, AVGO`, recording both as plan notes.
-Each `focus` entry became a top-priority research question and a monitored item.
-
-## 7. Example generated report
-
-`python -m eq_report --ticker NVDA --report-date 2026-09-02` →
-7-page PDF, 11 sections, 66 statements, 3 metric tables, 1 chart, 76 citations,
-0 critical QA findings, 6 warnings. Page 1 is Key Takeaways beside the key-data
-panel.
+## 9. Repository layout
 
 ```
-Key Takeaways                               9 statements   (+ key-data panel)
-Company Snapshot                            4 statements  1 chart (price, 12 months)
-Recent Developments                         8 statements
-Latest Financial Performance                9 statements  1 table (results vs YoY vs consensus)
-Operating Drivers and Segment Performance   9 statements  1 table (segment revenue, mix, growth)
-Competitive Landscape                       6 statements  1 table (peers on multiple and growth)
-Valuation and Market Expectations           6 statements
-Risks                                       5 statements
-Catalysts                                   4 statements
-What Matters Next                           6 statements
-Sources and Data Gaps                      76 citations
+eq_report/
+  config.py            settings; the only place environment variables are read
+  cli.py, __main__.py  command-line entry point
+  domain/              typed models: request, plan, observation, evidence, analytics, report, qa, run
+  planning/            ResearchPlanner and the OpenRouter planner client
+  providers/           MegadataAPI provider, rate limiting, registry
+  acquisition/         the three concurrent data branches
+  normalisation/       parsers, canonical metrics, units, dates, reconciliation, LLM rescue
+  evidence/            SQLite Evidence Store and the read-only EvidenceReader
+  analytics/           pure calculation functions and the engine
+  agents/              the 8 segment agents (rule-based and LLM) and their runner
+  synthesis/           ReportDraft builder, exhibits, key data, citations, LLM synthesis
+  qa/                  checks, entailment, auditor, triage, repair, web-claim auditor
+  llm/                 OpenRouter JSON client, usage and cost tracking, verification helpers
+  rendering/           full PDF, compact PDF, technical appendix, branding, JSON writers
+  pipeline/            orchestrator (the single entry point), run tracker, freshness, web gap-fill
+webui/app.py           the local web UI
+.env.example           every setting, commented
 ```
 
-The same command for a ticker the providers hold little on shows the shape
-adapting rather than printing empty headings: every section that the evidence
-could not fill is dropped, and the report becomes a one-page statement of what
-is missing and why, listed under "Sections not included".
+---
 
-Legacy illustrative excerpt retained to show the report structure; it is not a
-current live-data output. Reference numbers are assigned in order of first use,
-so they shift if the request changes:
+## 10. Limits
 
-> **2. Company Snapshot** — NVIDIA trades at $187.42 for a $4.56tn market capitalisation, +19.2% year to date
->
-> **1. Key Takeaways**
-> - FY2026 Q2 revenue was $62.30bn, up 55% year on year and +12% sequentially. *(reported)*[1]
-> - Data Center revenue was $54.20bn in FY2026 Q2, +60% year on year, representing 87% of total revenue. *(reported)*[2]
-> - Gross margin moved -0.9pp year on year. *(calculated)*[3][4]
-> - Revenue came in +4.2% versus consensus for the quarter. *(calculated)*[1][5]
-> - The company is growing +39 percentage points faster than the peer average while trading at a +15% forward P/E premium, so the premium is currently underwritten by a growth differential rather than by multiple expansion alone. *(interpretation)*[9][10][11][7][12][13][14]
->
-> **4. Latest Financial Performance** — FY2026 Q2 revenue $62.30bn, +55% year on year, 4.2% ahead of consensus, gross margin -0.9pp
-> - Management commentary on margins: Gross margin declined sequentially and year on year as the new platform ramps; we expect margins to recover towards the high 70s as the ramp matures and yields improve. *(management)*[39]
->
-> **7. Valuation and Market Expectations** — 31.4x forward earnings, +15% versus peers, +3% versus its own history
-> - On 31.4x forward earnings against +55% revenue growth in the latest quarter, the multiple embeds continued high growth rather than a normalisation; a deceleration towards peer growth rates would be the main source of multiple risk. *(interpretation)*[7]
->
-> **10. What Matters Next** — 8 checkable items before the FY2026 Q3 result
-> - Whether FY2026 Q3 revenue lands at or above the guided $66.50bn, against consensus that sits +2.5% away. *(calculated)*[24]
-> - Whether gross margin inflects: the observed trend across the periods held is slowing at -0.45pp per period, and the year-on-year change was -0.9pp. *(calculated)*[4][72][3]
-> - On the requested emphasis 'gross margin trajectory': non-GAAP gross margin is expected to be 75.5% for the third quarter, plus or minus 50 basis points. *(management)*[73]
->
-> **Sources**
-> `[1] MegadataAPI, Revenue (FY2026 Q2)`
-
-Note the `(reported)` / `(calculated)` / `(management)` / `(market expectation)`
-/ `(interpretation)` label on every line: fact, arithmetic, management assertion,
-market expectation and inference stay separable on the page.
-
-### Data freshness check (opt-in)
-
-`EQR_CHECK_DATA_FRESHNESS=true` (default off) adds one stage right after the
-Evidence Store is populated - before analysis or synthesis run at all - that
-asks the model, with the same web-search plugin, what the most recent fiscal
-period this company has actually publicly reported results for, as of the
-report date (`pipeline/freshness_check.py`). This runs *before* gap research
-specifically so a stale dataset is surfaced up front rather than only turning
-up later, mixed into a general-purpose addendum. A confident mismatch prints
-a distinct "DATA FRESHNESS NOTICE" banner on page 1 (its own colour, so it is
-never mistaken for the illustrative-sample-data banner) and a
-`temporal.dataset_stale` QA warning. It does not attempt to replace the
-dataset - see the module docstring for why, and the freshness-vs-sample-data
-tension noted under "Live web research for data gaps" above applies here too.
-
-### Neutral wording and analytical discipline
-
-This report states comparisons and lets the reader draw any investment
-conclusion; it does not itself say whether a valuation is justified or a
-stock is attractive. This is enforced at three layers, so no single point of
-failure can let judgmental language through:
-
-1. **Prompt-level.** The segment-agent and Key-Takeaways system prompts
-   (`agents/llm_agent.py`, `synthesis/llm_synthesizer.py`) ban constructions
-   like "supports its valuation premium" or "central risk", require the
-   observation/conclusion distinction ("NVDA trades at a 15.4% premium and
-   has higher growth" is supported; "the growth justifies the premium" is
-   not), and require explicit "the data cannot distinguish between X and Y"
-   framing when more than one explanation fits the evidence.
-2. **Deterministic rewrite.** Every statement passes through
-   `synthesis/terminology.py::soften_unsupported_causation` before it is
-   finalised: an unsupported causal claim ("driven by", "due to", "thanks
-   to", "on the back of", "as a result of") is rewritten to assert
-   coincidence rather than causation, unless the claim type already justifies
-   it (a management statement, a reported fact, or a calculation that
-   isolates the driver). Markers that can introduce a full clause ("because",
-   "led to", "caused") are not auto-rewritten, since the swap can break the
-   sentence's grammar there - those stay behind the QA warning below.
-3. **QA backstop.** `check_causal_claims` (existing) flags any remaining
-   unsupported causal marker; `check_judgmental_language` (new) flags
-   investment-judgment language directly. Neither blocks the PDF (both are
-   WARNING severity) since wording style is not a provenance failure, but
-   both are visible in the web UI's QA review section.
-
-### Annotated companion PDF
-
-Every run also produces a second PDF (`..._annotated.pdf`, same run
-directory) built from the same story-assembly code as the primary report
-(`PdfReportRenderer.render_annotated`, `synthesis/annotate.py`). Under every
-paragraph and bullet it prints one short line - "conveys: ..." - naming the
-single piece of information or conclusion the sentence exists to give the
-reader, so a sentence that has drifted into restating a number or describing
-itself rather than saying something is easy to spot. It costs one extra model
-call for the whole report (batched, not per-sentence) and falls back to a
-cheap heuristic label when no model is configured, so the companion PDF is
-still produced either way. It never feeds back into the primary report or
-into QA.
-
-### Degraded run
-
-`python -m eq_report --ticker ZZZZ --report-date 2026-09-02` — no sample
-data exists for that ticker. The pipeline completes, the PDF is produced, and it
-contains 15 recorded data gaps ("The Evidence Store contains no reported revenue
-for any period. Impact: The financial performance section cannot be written.")
-and **zero invented numbers**. There is a test asserting that every statement in
-that run still carries evidence or analytics references.
-
-## 8. Runtime boundaries
-
-| Component | Status | Notes |
-|---|---|---|
-| `providers/megadata.py` | **sole data provider** | Serves market data, fundamentals and documents. Failure remains visible; there is no data fallback. |
-| `ResearchPlanner` ticker resolution | **13-entry lookup** | Not a security master. An unresolved name plans without a ticker and records it. |
-| `EvidenceReader.documents_matching` | **substring keyword match** | Deliberately transparent. The natural place for embeddings later; no agent would change. |
-| LLM usage | **on whenever `EQR_MODEL_API_KEY` is set** | Planning, metric-label mapping and value rescue in normalisation, the analytics cross-check, segment agents, synthesis, QA entailment, the QA auditor, triage and repair all go through `ModelConfig`. Agents and synthesis may only cite ids they were shown; every LLM output is verified by code and each stage falls back to its deterministic logic. With no key, behaviour is a fully deterministic run. |
-
-## 9. Next components to productionise
-
-In the order I would tackle them.
-
-1. **Megadata completeness** — expand endpoint coverage for every required
-   fundamental, market and document field while retaining raw payload paths.
-2. **Consensus** — expand licensed consensus coverage beyond the currently
-   available MegaAPI/Alpha Vantage and Bloomberg fields. When consensus is
-   unavailable, the engine degrades to a documented gap rather than fabricating
-   a comparison.
-5. **Ticker and entity resolution** — replace the lookup dict with a security
-   master, and add fiscal-calendar metadata per issuer. The prototype's fiscal
-   convention is internally consistent but assumed, not looked up.
-6. ~~**LLM-backed narrative agents**~~ — done: `LLMSegmentAgent` and
-   `LLMSynthesizer`, gated by `EQR_MODEL_USE_FOR_AGENTS`/`_SYNTHESIS`, constrained
-   to evidence/analytics ids they were actually shown. Still open: a
-   token-cost/latency budget per run now that real OpenRouter calls are in the
-   critical path.
-7. **Document retrieval** — swap keyword matching for embeddings once the corpus
-   is real. Contained entirely within `EvidenceReader`.
-8. **QA hardening** — semantic claim-to-source entailment is implemented;
-   remaining work includes deeper units/dimensional analysis and broader
-   cross-source reconciliation rules.
-9. **Report design** — the accepted orange house template, compact brief and
-   technical dashboard are implemented; remaining work is broader exhibit and
-   accessibility refinement.
-10. **Evidence Store scale-up** — SQLite is right for one local run. Multiple
-    concurrent runs, evidence reuse across runs and retention policy need
-    Postgres and a migration path; `EvidenceQuery` is the seam.
-11. **Operational surface** — a job queue for report runs, run history and diffs
-    between two runs of the same company, and alerting on QA-blocked runs.
-
-Explicitly *not* built, per the brief: frontend, microservices, Kubernetes,
-vector database, auth, scheduling, deployment infrastructure.
+- MegadataAPI is the only data provider. Ticker resolution uses a small lookup table and is not a
+  security master. Document search is keyword matching.
+- LLM cost and run time depend on the model you choose; the stat cards and run manifest show the
+  real figures for each run.
+- The report is generated text checked against sources by code and an LLM reviewer. It is a
+  draft for a human analyst to read, not a substitute for one.
