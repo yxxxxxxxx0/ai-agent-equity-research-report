@@ -28,6 +28,7 @@ from ..logging_setup import get_logger, log_event
 from .auditor import QAAuditor
 from .checks import ALL_CHECKS, QAContext
 from .entailment import verify_claim_entailment
+from .triage import triage_findings
 from .web_claim_auditor import reverify_web_claims
 
 logger = get_logger("qa")
@@ -48,7 +49,7 @@ class QAEngine:
     def __init__(
         self, checks=ALL_CHECKS, model_config: ModelConfig | None = None,
         *, tracker: UsageTracker | None = None, verify_conflicts: bool = False,
-        verify_web_claims: bool = False,
+        verify_web_claims: bool = False, triage_mode: str = "shadow",
     ) -> None:
         self.checks = tuple(checks)
         self._model_config = model_config
@@ -62,6 +63,9 @@ class QAEngine:
         self._verify_web_claims = verify_web_claims
         # Web claims already re-confirmed by this engine (one engine per run).
         self._web_confirmed: set[str] = set()
+        # Heuristic-number-check triage (qa/triage.py): off | shadow | on.
+        self._triage_mode = triage_mode
+        self._triage_cache: dict = {}
 
     async def validate(
         self,
@@ -133,6 +137,10 @@ class QAEngine:
                 else finding
                 for finding in findings
             ]
+
+        findings = await triage_findings(
+            findings, reader, self._model_config, self._triage_mode,
+            tracker=self._tracker, cache=self._triage_cache)
 
         findings.sort(key=lambda f: (_SEVERITY_ORDER[f.severity], f.check))
         result = QAResult(findings=tuple(findings), checks_run=tuple(checks_run))

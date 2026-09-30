@@ -148,6 +148,8 @@ class Settings:
     # unsafe/unrepairable statement is omitted rather than waved through.
     qa_auto_repair: bool = True
     qa_auto_repair_max_attempts: int = 2
+    # LLM triage of the heuristic number checks (qa/triage.py): off | shadow | on.
+    qa_triage: str = "shadow"
     # Appends Bloomberg/MegadataAPI technical analysis to every full report.
     technical_appendix: bool = True
     # Produces a second, two-page investment brief from the same validated
@@ -190,6 +192,7 @@ class Settings:
             ),
             web_fill_max_claims=max(0, _env_int("WEB_FILL_MAX_CLAIMS", 12)),
             qa_auto_repair=_env_bool("QA_AUTO_REPAIR", True),
+            qa_triage=(_env("QA_TRIAGE", "shadow") or "shadow").lower(),
             qa_auto_repair_max_attempts=max(
                 0, _env_int("QA_AUTO_REPAIR_MAX_ATTEMPTS", 2)),
             # Both deliverables are contractual pipeline outputs. Environment

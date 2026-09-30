@@ -390,6 +390,7 @@ async def generate_report(
                 model_config=settings.model, tracker=usage_tracker,
                 verify_conflicts=settings.verify_metric_conflicts,
                 verify_web_claims=settings.web_fill_gaps,
+                triage_mode=settings.qa_triage,
             )
             qa_result = await qa_engine.validate(draft, plan, reader, analytics)
 

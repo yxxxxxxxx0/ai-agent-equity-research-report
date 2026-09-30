@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..config import ModelConfig
@@ -54,6 +54,7 @@ from ..llm.verify import safe_complete_json, verify_number
 from ..logging_setup import get_logger, log_event
 from . import canonical_metrics as cm
 from .dates import normalise_date, normalise_fiscal_period
+from .llm_rescue import rescue_values
 from .reconciliation import reconcile
 from .units import (
     UNIT_COUNT,
@@ -165,6 +166,7 @@ class Normalizer:
             extra_warnings.append(hint_note)
         overrides = 0
         reclassified = 0
+        failed: list[tuple[str, int, RawObservation, EvidenceCategory, NormalisationError]] = []
 
         for branch, observations, default_category in branches:
             for index, observation in enumerate(observations):
@@ -174,13 +176,7 @@ class Normalizer:
                         llm_hints.get((branch, index)),
                     )
                 except NormalisationError as exc:
-                    rejections.append(Rejection(
-                        branch=branch,
-                        raw_metric=observation.metric,
-                        raw_value=observation.value,
-                        reason=str(exc),
-                        source_name=observation.source.source_name,
-                    ))
+                    failed.append((branch, index, observation, default_category, exc))
                     continue
                 if not was_known and observation.metric not in unmapped:
                     unmapped.append(observation.metric)
@@ -202,6 +198,31 @@ class Normalizer:
                 "canonical metric using the LLM's proposal (see evidence metadata "
                 "'llm_reclassified_metric')."
             )
+
+        # Values the parsers rejected get one verified LLM rewrite attempt; the
+        # deterministic path still builds the item (see llm_rescue.py).
+        rescued = await rescue_values(
+            {i: str(f[2].value) for i, f in enumerate(failed)
+             if isinstance(f[2].value, str) and re.search(r"\d", f[2].value)},
+            self._model_config, tracker=self._tracker)
+        for i, (branch, index, observation, default_category, exc) in enumerate(failed):
+            if i in rescued:
+                try:
+                    item, _known, _flag = self._normalise_observation(
+                        replace(observation, value=rescued[i], metadata={
+                            **observation.metadata, "llm_rescued_value": str(observation.value)}),
+                        default_category, llm_hints.get((branch, index)))
+                    evidence.append(item)
+                    continue
+                except NormalisationError:
+                    pass
+            rejections.append(Rejection(
+                branch=branch, raw_metric=observation.metric, raw_value=observation.value,
+                reason=str(exc), source_name=observation.source.source_name))
+        if rescued:
+            extra_warnings.append(
+                f"{len(rescued)} unparseable value(s) were rewritten by the LLM and verified "
+                "against their quoted text (see evidence metadata 'llm_rescued_value').")
 
         for passage in document_passages:
             try:
