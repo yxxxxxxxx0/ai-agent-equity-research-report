@@ -22,14 +22,16 @@ python -m eq_report --ticker NVDA --report-date 2026-09-02
 > tracks a larger redesign in progress, split into what has shipped and what
 > is still deferred.
 
-Planning, the eight segment agents and Key Takeaways synthesis each have an
-**optional GPT-backed implementation, called through OpenRouter**, that
-replaces their deterministic counterpart when explicitly turned on via
-`.env`/environment variables (see section 5a). Acquisition, normalisation, the
-Evidence Store, the Analytics Engine and rendering are deterministic code.
-When a model is configured, QA adds an independent semantic claim-to-source
-review to its deterministic checks. With no model variables set, the pipeline
-is fully deterministic and has zero model API cost.
+Planning, the segment agents, synthesis and QA can use a **GPT-backed model
+called through OpenRouter** whenever `EQR_MODEL_API_KEY` is set (see section
+5a); each keeps its deterministic logic as the verifier and as the fallback
+when a call fails. Some segments can be pinned to their rule-based agent with
+`EQR_DETERMINISTIC_SEGMENTS`. The Evidence Store, the Analytics Engine, the QA
+publication verdict and rendering are deterministic code, and a model never
+sets a stored value: normalisation accepts an LLM-rewritten value only after
+code verifies it, and QA triage can only downgrade a heuristic finding when
+code confirms the figure against the Evidence Store. With no API key the
+pipeline is fully deterministic and has zero model API cost.
 
 ### Current publication guarantees
 
@@ -62,16 +64,19 @@ around another.
                                  ResearchRequest
                                         │
                               ResearchPlanner  ── ResearchPlan (typed)
-                              (deterministic, or GPT via OpenRouter
-                               when EQR_MODEL_API_KEY is set)
                                         │
                  ┌──────────────────────┼──────────────────────┐
                  ▼                      ▼                      ▼
         MarketDataService      FundamentalsService      DocumentsService     ← asyncio.gather
-        (RawObservation)       (RawObservation)      (RawDocumentPassage)
+        (Megadata only)        (RawObservation)      (RawDocumentPassage)
                  └──────────────────────┼──────────────────────┘
                                         ▼
-                              Normalisation layer          ← rejects, never coerces
+                              Normalisation layer
+                              1. deterministic parsers (authoritative)
+                              2. LLM maps unknown metric names (vocab-constrained)
+                              3. LLM rescue for rejected values: quoted span,
+                                 digits x known scale, sign, two runs agree
+                              4. leftovers -> Rejection (data gap), never coerced
                                         ▼
                         ╔═══════════════════════════╗
                         ║   Evidence Store (SQLite) ║      ← THE BOUNDARY
@@ -81,21 +86,29 @@ around another.
                  ┌──────────────────────┴──────────────────────┐
                  ▼                                             ▼
         AnalyticsEngine                              8 Segment Agents        ← asyncio.gather
-        (deterministic, no LLM,                      (deterministic, or GPT via
-         no config toggle)                            OpenRouter when
-                                                       EQR_MODEL_USE_FOR_AGENTS=true)
+        (pure functions; LLM only                    (LLM, or rule-based for
+         cross-checks, never sets                     EQR_DETERMINISTIC_SEGMENTS)
+         a value)
                  └──────────────────────┬──────────────────────┘
                                         ▼
                               Synthesis layer  ── ReportDraft (typed)
-                              (Key Takeaways deterministic, or GPT via
-                               OpenRouter when EQR_MODEL_USE_FOR_SYNTHESIS=true;
-                               every other section always deterministic)
                                         ▼
-                                    QA engine  ── QAResult
-                                        │
-                        critical? ──────┴────── no critical
-                            ▼                        ▼
-                    no PDF, full record        PdfReportRenderer
+        ┌───────────────────────────  QA GATE  ───────────────────────────┐
+        │ deterministic checks -> claim entailment (LLM) -> QA auditor ->  │
+        │ triage of the 2 heuristic number checks (EQR_QA_TRIAGE)          │
+        │                       -> QAResult                                │
+        └──────────────┬───────────────────────────────────▲──────────────┘
+              critical findings?                            │ repaired draft
+              │                 │ none                      │ re-runs the whole gate
+              ▼                 │                           │
+        QA repair loop ─────────┼───────────────────────────┘
+        1. LLM rewrite by subtraction (<=2 attempts; may not add a figure)
+        2. deterministic omit of a still-failing statement (<=3 rounds)
+        3. tidy_draft (repeats, empty sections)
+              │ still critical               │ no critical (warnings never block)
+              ▼                              ▼
+     no PDF, validation_failure.json    PdfReportRenderer + compact renderer
+                                          (+ technical appendix merge)
                                                      ▼
                                             PDF + report JSON + run manifest
 ```
@@ -352,12 +365,12 @@ A branch that dies does not stop the run — the loss surfaces as data gaps.
 | 1. Request | free text or JSON → `ResearchRequest` | `run.request` in the manifest |
 | 2. Planner | `ResearchRequest` → `ResearchPlan` (questions, required metrics/documents/analytics, 8 segment tasks, source priorities) | `01_plan.json` |
 | 3. Acquisition | `ResearchPlan` → 3 × `AcquisitionResult` **concurrently** (`asyncio.gather`), each with per-provider status, errors and warnings | `02_acquisition.json` |
-| 4. Normalisation | `RawObservation` / `RawDocumentPassage` → `EvidenceItem` + `Rejection` list | `03_normalisation.json` (every evidence item, in full) |
+| 4. Normalisation | `RawObservation` / `RawDocumentPassage` → `EvidenceItem` + `Rejection` list; rejected numeric strings get one verified LLM rewrite (`normalisation/llm_rescue.py`, tagged `llm_rescued_value`) | `03_normalisation.json` (every evidence item, in full) |
 | 5. Evidence Store | `EvidenceItem` → SQLite; downstream gets `EvidenceReader` | `output/evidence.sqlite3` |
 | 6. Analytics | evidence → `AnalyticsResult` (value, unit, formula, inputs, `input_evidence_ids`) | `04_analytics.json` |
 | 7. Agents | plan + reader + analytics → 8 × `SegmentResult` **concurrently** | `05_segments.json` |
 | 8. Synthesis | segment results → `ReportDraft` (sections, statements, tables, charts, citations, gaps) | `06_report_draft.json` |
-| 9. QA | `ReportDraft` → deterministic checks + semantic claim/source review → `QAResult` | `07_qa.json` |
+| 9. QA gate + repair | `ReportDraft` → deterministic checks + semantic claim/source review + number-check triage → `QAResult`; critical findings go to the repair loop, whose output re-enters the gate | `07_qa.json`, `07_qa_repair.json`, `06_report_draft.json` (repaired) |
 | 10. Render | `ReportDraft` → full PDF, compact PDF, optional technical appendix and report JSON | `<TICKER>_<date>_<run>.pdf`, `..._compact_two_page.pdf`, `..._with_technical_appendix.pdf`, `report_<run>.json` |
 | 12. Tracking | everything above → `ReportRun` | `run_<run>.json` |
 
@@ -369,6 +382,21 @@ result and the manifest — only the PDF is withheld.
 changed → why → financial impact → surprise vs expectations → forward
 expectations → implication for the multiple → relative position → what could
 break it → what matters next.
+
+**QA repair loop and triage.** Only *critical* findings are repaired; warnings
+never block and are not fed back (exceptions: `tidy_draft` acts on duplication
+warnings, and triage can downgrade a false-positive critical to a warning).
+The loop lives in `pipeline/orchestrator.py` and `qa/repair.py`: up to
+`EQR_QA_AUTO_REPAIR_MAX_ATTEMPTS` (default 2) LLM rewrites that may only remove
+content, then up to 3 rounds of deterministic omission, then `tidy_draft`;
+every step re-runs the full gate, and the last `QAResult` alone decides
+publication. Non-local failures (corrupt analytics, mixed identity,
+contradictory primary facts) stay hard blocks. `qa/triage.py` covers only
+`evidence.no_unsupported_numbers` and `evidence.numeric_claim_not_canonical`:
+the LLM says which canonical metric/period each figure is, code compares it
+with the Evidence Store, and only if every figure matches in two runs can the
+finding drop from critical to warning. `EQR_QA_TRIAGE=off|shadow|on` (default
+`shadow`: log only, change nothing).
 
 **QA check families** (severity policy: `CRITICAL` blocks the PDF):
 
@@ -432,10 +460,10 @@ EQR_MODEL_PROVIDER=openrouter
 EQR_MODEL_NAME=openai/gpt-5              # any OpenRouter chat-completions model
 EQR_MODEL_API_KEY=sk-or-v1-...           # or set OPENROUTER_API_KEY instead
 
-# Setting only the key above turns on GPT planning. These are separate,
-# independent opt-ins on top of that:
-EQR_MODEL_USE_FOR_AGENTS=true            # swap all 8 segment agents for LLMSegmentAgent
-EQR_MODEL_USE_FOR_SYNTHESIS=true         # swap Key Takeaways selection for LLMSynthesizer
+# Setting the key turns the model on for every LLM-capable stage.
+EQR_MODEL_NAME_AGENTS=                   # optional separate model for the segment agents
+EQR_DETERMINISTIC_SEGMENTS=company_snapshot,financial_performance,operating_drivers,market_commentary
+EQR_QA_TRIAGE=shadow                     # off | shadow (log only) | on (downgrade confirmed false positives)
 ```
 
 Whichever stages are on, they only ever *select and phrase* — every claim they
@@ -642,7 +670,7 @@ that run still carries evidence or analytics references.
 | `providers/megadata.py` | **sole data provider** | Serves market data, fundamentals and documents. Failure remains visible; there is no data fallback. |
 | `ResearchPlanner` ticker resolution | **13-entry lookup** | Not a security master. An unresolved name plans without a ticker and records it. |
 | `EvidenceReader.documents_matching` | **substring keyword match** | Deliberately transparent. The natural place for embeddings later; no agent would change. |
-| LLM usage | **optional, implemented, off by default** | `ModelConfig` is used: `ResearchPlanner` plans via GPT through OpenRouter whenever `EQR_MODEL_API_KEY` is set; `LLMSegmentAgent` and `LLMSynthesizer` additionally replace their deterministic counterparts under `EQR_MODEL_USE_FOR_AGENTS`/`EQR_MODEL_USE_FOR_SYNTHESIS`. All three are constrained to cite only ids they were actually shown. With no model variables set, behaviour is unchanged from a fully deterministic run. |
+| LLM usage | **on whenever `EQR_MODEL_API_KEY` is set** | Planning, metric-label mapping and value rescue in normalisation, the analytics cross-check, segment agents, synthesis, QA entailment, the QA auditor, triage and repair all go through `ModelConfig`. Agents and synthesis may only cite ids they were shown; every LLM output is verified by code and each stage falls back to its deterministic logic. With no key, behaviour is a fully deterministic run. |
 
 ## 10. Next components to productionise
 

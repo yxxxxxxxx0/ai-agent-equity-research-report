@@ -98,7 +98,7 @@ STAGES: tuple[tuple[str, str, str], ...] = (
     ("technical_appendix", "Technical appendix", "Fetch and chart Bloomberg OHLCV - runs "
      "alongside analysis, independent of the report draft"),
     ("synthesis", "Synthesis", "Draft the report's narrative and exhibits"),
-    ("qa", "QA", "Check every claim against the evidence store"),
+    ("qa", "QA", "Check every claim against the evidence store; repair and re-check critical findings"),
     ("pdf", "Render PDF", "Lay out the full report"),
     ("compact_pdf", "Compact PDF", "Render the two-page short version - runs alongside "
      "the full PDF"),
@@ -678,6 +678,9 @@ FLOWCHART_HTML = """
     <path d="M340,580 L340,605 M190,605 L490,605 M190,605 L190,620 M490,605 L490,620"
           style="stroke:var(--pos);stroke-width:2;fill:none;" marker-end="url(#fc-arrow-pos)"></path>
     <path d="M440,552 L480,552" style="stroke:var(--neg-border);stroke-width:2;fill:none;" marker-end="url(#fc-arrow-neg)"></path>
+    <path d="M240,540 L212,540" style="stroke:var(--neg-border);stroke-width:2;fill:none;" marker-end="url(#fc-arrow-neg)"></path>
+    <path d="M212,566 L238,566" style="stroke:var(--rule);stroke-width:2;fill:none;" marker-end="url(#fc-arrow)"></path>
+    <text x="20" y="600" style="font:700 9.5px var(--font-ui);fill:var(--muted);">repaired draft goes back through the gate</text>
     <text x="304" y="598" style="font:700 9.5px var(--font-ui);fill:var(--pos);">clears QA</text>
     <text x="480" y="515" style="font:700 9.5px var(--font-ui);fill:var(--neg-ink);">critical findings</text>
   </svg>
@@ -697,7 +700,7 @@ FLOWCHART_HTML = """
   </div>
 
   <div class="fc-node" data-key="normalisation" data-node="normalisation" style="left:240px;top:186px;width:200px;height:56px;">
-    <div class="fc-name">Normalisation</div><div class="fc-blurb">Reconcile into canonical facts</div>
+    <div class="fc-name">Normalisation</div><div class="fc-blurb">Parsers first; verified LLM rescue for rejects</div>
   </div>
 
   <div class="fc-node" data-key="evidence_ingestion" data-node="evidence_store" style="left:240px;top:270px;width:200px;height:56px;">
@@ -719,7 +722,10 @@ FLOWCHART_HTML = """
   </div>
 
   <div class="fc-node fc-gate" data-key="qa" data-node="qa_gate" style="left:240px;top:524px;width:200px;height:56px;">
-    <div class="fc-name">QA gate</div><div class="fc-blurb">Check every claim vs. evidence</div>
+    <div class="fc-name">QA gate</div><div class="fc-blurb">Rules + LLM entailment + triage</div>
+  </div>
+  <div class="fc-node" data-key="qa" data-notime="1" data-node="qa_repair" style="left:20px;top:524px;width:190px;height:56px;">
+    <div class="fc-name">QA repair loop</div><div class="fc-blurb">Trim or omit critical statements, then re-check</div>
   </div>
   <div class="fc-node fc-blocked" data-key="__blocked" style="left:480px;top:524px;width:170px;height:56px;">
     <div class="fc-name">Blocked</div><div class="fc-blurb">No PDF - fixes required</div>
@@ -920,7 +926,7 @@ APP_HTML = """
       document.querySelectorAll(".fc-node[data-key]").forEach(node => {
         let badge = node.querySelector(".fc-time");
         const key = node.dataset.key;
-        const elapsed = key === "__blocked" ? null : stageElapsedMs(job, key);
+        const elapsed = key === "__blocked" || node.dataset.notime ? null : stageElapsedMs(job, key);
         if (elapsed == null) {
           if (badge) badge.remove();
           return;
