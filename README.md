@@ -46,6 +46,9 @@ Start it with `python webui/app.py` and open **http://127.0.0.1:5050**. Stop it 
 `Ctrl+C` in the terminal. Jobs live in the server's memory, so restarting the server
 clears the page; the finished files stay on disk (see section 6).
 
+The page fits on one screen: steps 1 and 2 on the left, the report viewer and QA review in the middle,
+and the workflow map on the right.
+
 **Generate a report**
 
 1. **Enter a ticker** in box 1, for example `NVDA`, `AAPL` or `TSLA`.
@@ -57,6 +60,9 @@ clears the page; the finished files stay on disk (see section 6).
    more; the price line under the dropdown shows the trade-off.
 3. Click **Generate Reports**. The model dropdown locks until the run finishes. A run
    typically takes several minutes.
+4. To cancel, click **Stop run**, which appears under the ticker box while a run is active. The
+   run stops at its next step and the page returns to ready. A model call already in flight still
+   finishes and is billed, but its result is discarded.
 
 **Watch it run**
 

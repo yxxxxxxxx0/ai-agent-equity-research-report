@@ -22,6 +22,7 @@ the desk behind the printed note rather than an unrelated admin panel.
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import datetime as dt
 import json
@@ -78,7 +79,7 @@ from eq_report.evidence.store import EvidenceStore  # noqa: E402
 from eq_report.logging_setup import configure_logging  # noqa: E402
 from eq_report.llm import usage as usage_module  # noqa: E402
 from eq_report.pipeline import run_tracker as run_tracker_module  # noqa: E402
-from eq_report.pipeline.orchestrator import generate_report_sync  # noqa: E402
+from eq_report.pipeline.orchestrator import generate_report  # noqa: E402
 from eq_report.pipeline.run_tracker import RUN_ID_PATTERN  # noqa: E402
 
 TICKER_PATTERN = re.compile(r"[A-Z0-9.\-]{1,10}")
@@ -288,6 +289,35 @@ def _qa_review(result, run_dir: Path | None) -> dict:
     }
 
 
+_RUNS: dict[str, tuple] = {}
+
+
+def _execute(job_id: str, research_request, settings, resume_from):
+    """Run the pipeline on its own event loop so the Stop button can cancel it.
+
+    Cancelling stops the pipeline at its next await. A model call already in flight
+    still finishes (and is billed) on its worker thread, but its result is discarded.
+    """
+    loop = asyncio.new_event_loop()
+    task = loop.create_task(generate_report(research_request, settings, resume_from=resume_from))
+    _RUNS[job_id] = (loop, task)
+    try:
+        with _JOBS_LOCK:
+            if JOBS[job_id].get("stop_requested"):
+                task.cancel()
+        return loop.run_until_complete(task)
+    except asyncio.CancelledError:
+        pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+        for leftover in pending:
+            leftover.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        raise
+    finally:
+        _RUNS.pop(job_id, None)
+        loop.close()
+
+
 def _run_job(
     job_id: str, ticker: str | None, report_date: dt.date | None,
     resume_from: str | None = None, model: str | None = None,
@@ -295,7 +325,8 @@ def _run_job(
     _THREAD_JOB[threading.get_ident()] = job_id
     _JOB_CTX.set(job_id)
     with _JOBS_LOCK:
-        JOBS[job_id]["status"] = "running"
+        if JOBS[job_id].get("status") != "stopping":
+            JOBS[job_id]["status"] = "running"
         JOBS[job_id]["started_at"] = time.time()
     try:
         settings = Settings.from_env(output_dir=REPO_ROOT / "output_webui")
@@ -303,16 +334,12 @@ def _run_job(
             JOBS[job_id]["db_path"] = str(settings.database_path)
         if model:
             settings = replace(settings, model=replace(settings.model, model=model))
-        if resume_from:
-            # Re-runs analysis/synthesis/QA/rendering against that run's
-            # already-persisted plan and Evidence Store rows - no planning
-            # or acquisition call is repeated. See
-            # eq_report.pipeline.orchestrator.generate_report's docstring.
-            result = generate_report_sync(None, settings, resume_from=resume_from)
-        else:
-            research_request = ResearchRequest(
-                company=ticker, ticker=ticker, report_date=report_date)
-            result = generate_report_sync(research_request, settings)
+        # A resume re-runs analysis/synthesis/QA/rendering against that run's
+        # already-persisted plan and Evidence Store rows - no planning or
+        # acquisition call is repeated (see orchestrator.generate_report).
+        research_request = None if resume_from else ResearchRequest(
+            company=ticker, ticker=ticker, report_date=report_date)
+        result = _execute(job_id, research_request, settings, resume_from)
         usage = (result.run.llm_usage or {}) if result.run else {}
         qa = result.qa_result
         run_dir = Path(result.report_json_path).parent if result.report_json_path else None
@@ -377,6 +404,9 @@ def _run_job(
                     else result.summary()
                 ),
             )
+    except asyncio.CancelledError:
+        with _JOBS_LOCK:
+            JOBS[job_id].update(status="stopped", error="Stopped by you.")
     except Exception as exc:  # keep the failure visible in the UI, not just the console
         with _JOBS_LOCK:
             JOBS[job_id].update(
@@ -386,7 +416,7 @@ def _run_job(
     finally:
         with _JOBS_LOCK:
             job = JOBS.get(job_id)
-            if job is not None and job.get("status") in {"done", "failed"}:
+            if job is not None and job.get("status") in {"done", "failed", "stopped"}:
                 job.setdefault("completed_at", time.time())
         _THREAD_JOB.pop(threading.get_ident(), None)
 
@@ -539,6 +569,23 @@ def api_sources(job_id: str):
     finally:
         store.close()
     return jsonify({"evidence": evidence, "analytics": analytics})
+
+
+@app.route("/api/stop/<job_id>", methods=["POST"])
+def api_stop(job_id: str):
+    with _JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            return jsonify({"error": "unknown job"}), 404
+        if job.get("status") not in {"queued", "running"}:
+            return jsonify({"error": "job is not running"}), 409
+        job["status"] = "stopping"
+        job["stop_requested"] = True
+    run = _RUNS.get(job_id)
+    if run is not None:
+        loop, task = run
+        loop.call_soon_threadsafe(task.cancel)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/models", methods=["GET"])
@@ -1059,6 +1106,45 @@ APP_STYLE = """
     .src-inputs td:last-child { text-align: right; font-family: var(--font-mono); color: #ffb98a; }
     .src-empty { color: var(--muted); font-size: 13.5px; padding: 8px 0; }
     .src-details > summary { cursor: pointer; font-size: 12.5px; font-weight: 700; color: var(--muted); margin-top: 10px; }
+    /* ---- one-screen dashboard: left 1-2, middle 3-4, right the workflow map ---- */
+    html, body { height: 100%; }
+    body { overflow: hidden; }
+    .shell { max-width: none; height: 100vh; padding: 10px 14px 12px; display: flex; flex-direction: column; }
+    .topline { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; margin-bottom: 10px; }
+    .brandbar { margin: 0; }
+    .brand-title { font-size: 22px; }
+    .stats { display: flex; gap: 8px; margin: 0; }
+    .stat { flex-direction: row; align-items: baseline; gap: 8px; padding: 6px 12px; border-radius: 10px; }
+    .stat-v { font-size: 14px; }
+    .stat-model .stat-v { font-size: 12.5px; line-height: 1.3; }
+    .dash { flex: 1; min-height: 0; display: grid; gap: 12px; align-items: stretch;
+      grid-template-columns: minmax(270px, 19%) minmax(0, 1fr) minmax(420px, 36%); }
+    .col { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+    .col .card { margin: 0; padding: 14px 16px; min-height: 0; }
+    .col-a .card:last-child { flex: 1; overflow-y: auto; }
+    .viewer-card { flex: 1.25 1 0; min-height: 0; }
+    .viewer-card .viewer-pane { min-height: 0; flex: 1; }
+    .viewer-pane.report { max-height: none; padding: 18px 22px 24px; }
+    .viewer-head { margin-bottom: 10px; }
+    .qa-card { flex: 1 1 0; display: flex; flex-direction: column; overflow: hidden; }
+    .qa-card .hint, .map-card .hint { display: none; }
+    .qa-card #qa-body { overflow-y: auto; flex: 1; min-height: 0; }
+    .map-card { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+    .map-card .fc-scroll { flex: 1; min-height: 0; overflow: hidden; display: flex; justify-content: center; align-items: flex-start; }
+    .map-card .fc-wrap { flex: none; margin: 0; }
+    .col-a .ticker-row { flex-direction: column; }
+    .col-a .ticker-row .btn { justify-content: center; }
+    .btn-stop { width: 100%; justify-content: center; margin-top: 10px; padding: 10px 14px;
+      background: #2c1a1f; color: #fca5a5; border: 1px solid #5b2a33; }
+    .btn-stop:hover { background: #3a2026; color: #fff; }
+    .btn-stop:disabled { opacity: 0.6; cursor: default; }
+    @media (max-width: 1100px) {
+      body { overflow: auto; }
+      .shell { height: auto; }
+      .dash { grid-template-columns: 1fr; }
+      .viewer-card { min-height: 520px; }
+      .map-card { min-height: 560px; }
+    }
     .error-note, .qa-note { background: #2c1a1f; border-color: #5b2a33; color: #fca5a5; }
 """
 
@@ -1195,6 +1281,7 @@ APP_HTML = """
 </head>
 <body>
   <div class="shell">
+    <div class="topline">
     <header class="brandbar">
       <div class="brand">
         <div class="brand-title">EQR Report</div>
@@ -1208,8 +1295,10 @@ APP_HTML = """
       <div class="stat stat-model"><span class="stat-k">Model</span><span class="stat-v" id="t-model">&mdash;</span></div>
     </div>
 
-    <div class="layout">
-      <div>
+    </div>
+
+    <div class="layout dash">
+      <div class="col col-a">
         <div class="card">
           <h2>1. Enter Ticker</h2>
           <p class="hint">Generate a full and compact equity research report.</p>
@@ -1223,6 +1312,7 @@ APP_HTML = """
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
             </button>
           </div>
+          <button type="button" id="stop-btn" class="btn btn-stop" onclick="stopRun()" style="display:none">&#9632; Stop run</button>
           <p class="example-hint">e.g. AAPL, MSFT, NVDA, TSLA</p>
           <div class="model-block">
             <label class="field-label" for="model-select">Model</label>
@@ -1252,7 +1342,7 @@ APP_HTML = """
           <div class="steps" id="steps"></div>
         </div>
       </div>
-
+      <div class="col col-b">
       <div class="card viewer-card">
         <div class="viewer-head">
           <h2>3. Report Viewer</h2>
@@ -1275,7 +1365,6 @@ APP_HTML = """
           </div>
         </div>
       </div>
-    </div>
 
     <div class="card qa-card">
       <div class="qa-head">
@@ -1286,10 +1375,14 @@ APP_HTML = """
       <div id="qa-body"><div class="qa-empty">Findings, repairs and notices appear here once QA has run.</div></div>
     </div>
 
+      </div>
+      <div class="col col-c">
     <div class="card map-card">
       <h2>Workflow map</h2>
       <p class="hint">The pipeline's real shape - parallel acquisition sources, parallel analysis, the QA pass/fail gate. Nodes glow live as your report moves through it.</p>
       """ + FLOWCHART_HTML + """
+    </div>
+      </div>
     </div>
   </div>
 
@@ -1432,7 +1525,7 @@ APP_HTML = """
     function renderSteps(job) {
       const completed = new Set((job && job.completed_stages) || []);
       const active = new Set((job && job.active_stages) || []);
-      const done = job && (job.status === "done" || job.status === "failed");
+      const done = job && isFinished(job);
       const html = STEP_GROUPS.map((group) => {
         const [key, title, desc, stages] = group;
         const isCurrent = !done && stages.length > 0 && stages.some(s => active.has(s));
@@ -1569,6 +1662,29 @@ APP_HTML = """
       tokensEl.textContent = total ? total.toLocaleString() : "—";
     }
 
+    function isFinished(job) {
+      return job && (job.status === "done" || job.status === "failed" || job.status === "stopped");
+    }
+
+    async function stopRun() {
+      if (!jobId) return;
+      const btn = document.getElementById("stop-btn");
+      btn.disabled = true;
+      btn.innerHTML = "Stopping&hellip;";
+      try { await fetch(`/api/stop/${jobId}`, {method: "POST"}); } catch (err) { btn.disabled = false; }
+    }
+
+    // Scale the workflow map (designed at 680x716) to whatever room its column has.
+    function fitMap() {
+      const box = document.querySelector(".map-card .fc-scroll");
+      const wrap = document.querySelector(".map-card .fc-wrap");
+      if (!box || !wrap) return;
+      wrap.style.zoom = 1;
+      const s = Math.min(box.clientWidth / 680, box.clientHeight / 716, 1.6);
+      wrap.style.zoom = Math.max(0.3, s);
+    }
+    window.addEventListener("resize", fitMap);
+
     // ---- download buttons -------------------------------------------------------
     function updateDownloads(job) {
       const arts = (job && job.artifacts) || {};
@@ -1703,7 +1819,12 @@ APP_HTML = """
       }
       pane.dataset.report = "";
       pane.className = "viewer-pane";
-      if (job && job.status === "failed") {
+      if (job && job.status === "stopped") {
+        pane.innerHTML = `<div class="viewer-empty">
+          <div class="big">Run stopped</div>
+          <div class="small">You stopped this run. Enter a ticker to start a new one, or resume a saved run.</div>
+        </div>`;
+      } else if (job && job.status === "failed") {
         const qaMsg = job.qa_critical
           ? `QA blocked publication: ${job.qa_critical} critical finding(s), ${job.qa_warnings} warning(s).`
           : (job.error || "The run failed.");
@@ -1933,12 +2054,17 @@ APP_HTML = """
       const btn = document.getElementById("generate-btn");
       const modelSel = document.getElementById("model-select");
       if (job.model && MODELS.some(m => m.id === job.model)) { modelSel.value = job.model; onModelChange(); }
-      modelSel.disabled = job.status !== "done" && job.status !== "failed";
+      modelSel.disabled = !isFinished(job);
+      const stopBtn = document.getElementById("stop-btn");
+      const active = !isFinished(job);
+      stopBtn.style.display = active ? "flex" : "none";
+      stopBtn.disabled = job.status === "stopping";
+      stopBtn.innerHTML = job.status === "stopping" ? "Stopping&hellip;" : "&#9632; Stop run";
       syncDD();
       if (job.ticker && !job.resume_from) document.getElementById("ticker").value = job.ticker;
       if (job.resume_from) document.getElementById("resume-run-id").value = job.resume_from;
 
-      if (job.status === "done" || job.status === "failed") {
+      if (isFinished(job)) {
         btn.disabled = false;
         renderCostByLayer(job);
         clearTimeout(pollTimer);
@@ -1950,6 +2076,7 @@ APP_HTML = """
 
     renderSteps(null);
     renderQA(null);
+    fitMap();
     loadModels();
     tickTimer = setInterval(tickTimes, 1000);
     if (jobId) { renderViewer({status: "running"}); poll(); }
