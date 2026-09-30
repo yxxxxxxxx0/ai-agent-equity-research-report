@@ -130,7 +130,15 @@ def _credits() -> dict | None:
     except Exception:  # noqa: BLE001 - show the last known value, or nothing
         return _CREDITS["value"]
     total, used = float(data["total_credits"]), float(data["total_usage"])
-    _CREDITS.update(at=time.time(), value={"total": total, "used": used, "remaining": round(total - used, 2)})
+    try:  # per-key usage since 00:00 UTC; the account-wide split by day needs a management key
+        key_request = urllib.request.Request(
+            "https://openrouter.ai/api/v1/key", headers={"Authorization": f"Bearer {key}"})
+        with urllib.request.urlopen(key_request, timeout=8) as response:
+            today = float(json.load(response)["data"]["usage_daily"])
+    except Exception:  # noqa: BLE001 - the rest of the numbers are still useful
+        today = None
+    _CREDITS.update(at=time.time(), value={
+        "total": total, "used": used, "remaining": round(total - used, 2), "today": today})
     return _CREDITS["value"]
 
 
@@ -1163,7 +1171,7 @@ APP_STYLE = """
       grid-template-columns: minmax(250px, 16%) minmax(0, 1fr) minmax(380px, 640px); }
     .col { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
     .col .card { margin: 0; padding: 14px 16px; min-height: 0; }
-    .col-a .card:last-child { flex: 1; overflow-y: auto; }
+    .col-a .steps-card { flex: 1; overflow-y: auto; }
     .viewer-card { flex: 1 1 0; min-height: 0; }
     .viewer-card .viewer-pane { min-height: 0; flex: 1; }
     .viewer-pane.report { max-height: none; padding: 18px 22px 24px; }
@@ -1187,6 +1195,13 @@ APP_STYLE = """
       .viewer-card { min-height: 520px; }
       .map-card { min-height: 560px; }
     }
+    .statbox { flex: none; display: flex; flex-direction: column; gap: 2px; }
+    .stat-row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 6px 0;
+      border-bottom: 1px dashed var(--border); }
+    .stat-row:last-child { border-bottom: none; padding-bottom: 0; }
+    .stat-row:first-child { padding-top: 0; }
+    .statbox .stat-k { font-size: 10px; }
+    .statbox .stat-v { font-size: 13px; }
     .run-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
     .run-top h2 { margin: 0; }
     .run-ticker { font-size: 34px; font-weight: 800; letter-spacing: -0.02em; color: #fff; margin: 12px 0 6px; line-height: 1.1; word-break: break-all; }
@@ -1382,14 +1397,6 @@ APP_HTML = """
       </div>
     </header>
 
-    <div class="stats">
-      <div class="stat"><span class="stat-k">Elapsed</span><span class="stat-v" id="t-elapsed">&mdash;</span></div>
-      <div class="stat"><span class="stat-k">LLM cost</span><span class="stat-v" id="t-cost">$0.00</span></div>
-      <div class="stat"><span class="stat-k">Tokens</span><span class="stat-v" id="t-tokens">&mdash;</span></div>
-      <div class="stat"><span class="stat-k">Credits left</span><span class="stat-v" id="t-credits">&mdash;</span></div>
-      <div class="stat stat-model"><span class="stat-k">Model</span><span class="stat-v" id="t-model">&mdash;</span></div>
-    </div>
-
     </div>
 
     <div class="layout dash">
@@ -1402,9 +1409,16 @@ APP_HTML = """
           <button type="button" id="stop-btn" class="btn btn-stop" onclick="stopRun()" style="display:none">&#9632; Stop run</button>
         </div>
 
-        <div class="card">
+        <div class="card steps-card">
           <h2>2. Generating Reports</h2>
           <div class="steps" id="steps"></div>
+        </div>
+        <div class="card statbox">
+          <div class="stat-row"><span class="stat-k">Elapsed</span><span class="stat-v" id="t-elapsed">&mdash;</span></div>
+          <div class="stat-row"><span class="stat-k">LLM cost</span><span class="stat-v" id="t-cost">$0.00</span></div>
+          <div class="stat-row"><span class="stat-k">Tokens</span><span class="stat-v" id="t-tokens">&mdash;</span></div>
+          <div class="stat-row"><span class="stat-k">Credits left</span><span class="stat-v" id="t-credits">&mdash;</span></div>
+          <div class="stat-row" title="Credits this API key has used since 00:00 UTC"><span class="stat-k">Used today</span><span class="stat-v" id="t-today">&mdash;</span></div>
         </div>
       </div>
       <div class="col col-b">
@@ -1659,6 +1673,8 @@ APP_HTML = """
         if (!el || c.remaining == null) return;
         el.textContent = "$" + c.remaining.toFixed(2);
         el.parentElement.title = "$" + c.used.toFixed(2) + " used of $" + c.total.toFixed(2);
+        const today = document.getElementById("t-today");
+        if (today && c.today != null) today.textContent = "$" + c.today.toFixed(2);
       } catch (err) { /* the chip is a convenience */ }
     }
 
@@ -2254,7 +2270,8 @@ HOME_HTML = """
         const c = await (await fetch("/api/credits")).json();
         if (c.remaining == null) return;
         document.getElementById("home-credits").textContent =
-          "OpenRouter credits left: $" + c.remaining.toFixed(2) + " of $" + c.total.toFixed(2);
+          "OpenRouter credits left: $" + c.remaining.toFixed(2) + " of $" + c.total.toFixed(2)
+          + (c.today != null ? "  \u00b7  used today: $" + c.today.toFixed(2) : "");
       } catch (err) { /* optional */ }
     }
 

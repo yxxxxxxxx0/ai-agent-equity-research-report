@@ -69,10 +69,11 @@ returns you to the home page.
 
 **Watch it run**
 
-- **Stat cards** at the top show elapsed time, LLM cost so far, tokens, your remaining OpenRouter credits, and
-  the model in use. The clocks stop when a run ends or is stopped. The home page shows the credits too.
+- **The stats panel** in the bottom-left corner shows elapsed time, LLM cost so far, tokens, your remaining
+  OpenRouter credits, and how much you have used today (this API key's usage since 00:00 UTC, as OpenRouter
+  reports it). The clocks stop when a run ends or is stopped. The home page shows credits left and used today too.
 - **2. Generating Reports** is a five-step tracker with a timer on each step.
-- **Workflow map** (bottom of the page) shows the real pipeline. Nodes turn green when
+- **Workflow map** (top right) shows the real pipeline. Nodes turn green when
   done and pulse orange while running; each shows its time and, for LLM stages, its cost.
   The QA gate branches three ways: *critical* findings go to the repair loop, which sends
   a repaired draft back for a *re-check*; findings that stay *unfixed* lead to **Blocked**
