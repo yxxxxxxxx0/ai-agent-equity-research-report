@@ -124,56 +124,24 @@ environment, and credentials are never logged.
 
 ## 4. How the pipeline works
 
-```
-                                 ResearchRequest
-                                        │
-                              ResearchPlanner  ── ResearchPlan
-                                        │
-                 ┌──────────────────────┼──────────────────────┐
-                 ▼                      ▼                      ▼
-        MarketDataService      FundamentalsService      DocumentsService     ← concurrent
-        (MegadataAPI)          (RawObservation)      (RawDocumentPassage)
-                 └──────────────────────┼──────────────────────┘
-                                        ▼
-                              Normalisation layer
-                              1. deterministic parsers (authoritative)
-                              2. LLM maps unknown metric names (vocabulary-constrained)
-                              3. LLM rescue for rejected values: quoted span,
-                                 digits × known scale, sign, two runs agree
-                              4. leftovers → Rejection (a data gap), never coerced
-                                        ▼
-                        ╔═══════════════════════════╗
-                        ║   Evidence Store (SQLite) ║      ← THE BOUNDARY
-                        ╚═══════════════════════════╝
-                                        ▼
-                          EvidenceReader (read-only)
-                 ┌──────────────────────┴──────────────────────┐
-                 ▼                                             ▼
-        AnalyticsEngine                              8 Segment Agents        ← concurrent
-        (pure functions; the LLM only               (LLM, or rule-based for
-         cross-checks, never sets a value)            EQR_DETERMINISTIC_SEGMENTS)
-                 └──────────────────────┬──────────────────────┘
-                                        ▼
-                              Synthesis ── ReportDraft (typed)
-                                        ▼
-        ┌───────────────────────────  QA GATE  ───────────────────────────┐
-        │ deterministic checks → claim entailment (LLM) → QA auditor →     │
-        │ triage of the 2 heuristic number checks (EQR_QA_TRIAGE)          │
-        │                        → QAResult                                │
-        └──────────────┬───────────────────────────────────▲──────────────┘
-              critical findings?                            │ repaired draft
-              │                 │ none                      │ re-runs the whole gate
-              ▼                 │                           │
-        QA repair loop ─────────┼───────────────────────────┘
-        1. LLM rewrite by subtraction (≤2 attempts; may not add a figure)
-        2. deterministic omit of a still-failing statement (≤3 rounds)
-        3. tidy (repeats, empty sections), then one more repair pass
-              │ still critical               │ no critical (warnings never block)
-              ▼                              ▼
-     no PDF, validation_failure.json    Full PDF + compact PDF (+ technical appendix)
-                                                     ▼
-                                      PDFs + report JSON + run manifest
-```
+<p align="center"><img src="assets/workflow_map.png" alt="Workflow map" width="720"></p>
+
+This is the same map the web UI shows, where each node lights up as a run reaches it.
+
+**Reading the map**
+
+- **Acquisition** runs three branches in parallel (market data, fundamentals, documents).
+- **Normalisation** tries the deterministic parsers first. An LLM may map unknown metric names to
+  a fixed vocabulary, and may rewrite a rejected value only if code verifies it (quoted span,
+  digits times a known scale, matching sign, two runs agree). Anything left becomes a recorded
+  data gap and is never coerced.
+- **Evidence store** is the boundary: analytics and agents read from it and nothing else.
+- **Analytics engine, segment agents and technical appendix** run in parallel. Analytics are pure
+  functions; the LLM only cross-checks them and never sets a value.
+- **QA gate** runs the deterministic checks, the claim-entailment review, the QA auditor and the
+  number-check triage. *Critical* findings go to the **repair loop**, which trims or drops the
+  failing statements and sends the repaired draft back for a **re-check**. A draft that **clears
+  QA** goes on to both PDFs; findings that stay **unfixed** lead to **Blocked** and no PDF.
 
 **Stages**
 
@@ -304,6 +272,7 @@ eq_report/
   rendering/           full PDF, compact PDF, technical appendix, branding, JSON writers
   pipeline/            orchestrator (the single entry point), run tracker, freshness, web gap-fill
 webui/app.py           the local web UI
+assets/workflow_map.png  the workflow map used in this README (rendered from the web UI's own map)
 .env.example           every setting, commented
 ```
 
