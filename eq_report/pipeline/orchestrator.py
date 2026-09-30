@@ -395,11 +395,15 @@ async def generate_report(
             qa_result = await qa_engine.validate(draft, plan, reader, analytics)
 
             repair_log: list[dict[str, Any]] = []
-            if settings.qa_auto_repair and qa_result.has_critical_errors:
+
+            async def _converge() -> None:
+                """Rephrase (LLM, subtraction only), then drop, until QA has no critical."""
+                nonlocal draft, qa_result
                 repairer = DraftRepairer(settings.model, tracker=usage_tracker)
                 for attempt in range(1, settings.qa_auto_repair_max_attempts + 1):
-                    outcome = await repairer.repair(
-                        draft, qa_result, reader, analytics)
+                    if not qa_result.has_critical_errors:
+                        return
+                    outcome = await repairer.repair(draft, qa_result, reader, analytics)
                     repair_log.append({
                         "attempt": attempt,
                         "critical_before": len(qa_result.critical),
@@ -412,21 +416,17 @@ async def generate_report(
                     draft = outcome.draft
                     qa_result = await qa_engine.validate(draft, plan, reader, analytics)
                     repair_log[-1]["critical_after"] = len(qa_result.critical)
-                    if not qa_result.has_critical_errors:
-                        break
 
-                # Last resort: a statement still failing after the final LLM
-                # attempt is omitted deterministically (no model), so the loop
-                # always converges instead of blocking on one bad sentence.
-                # Repeated because the entailment reviewer is a model: a fresh
-                # QA pass can flag a sentence an earlier pass accepted.
+                # Last resort: a statement still failing is omitted deterministically
+                # (no model), so the loop converges instead of blocking on one
+                # sentence. Repeated because the entailment reviewer is a model: a
+                # fresh QA pass can flag a sentence an earlier pass accepted.
                 for _round in range(3):
                     if not qa_result.has_critical_errors:
-                        break
-                    outcome = await DraftRepairer(None).repair(
-                        draft, qa_result, reader, analytics)
+                        return
+                    outcome = await DraftRepairer(None).repair(draft, qa_result, reader, analytics)
                     if not outcome.changed:
-                        break
+                        return
                     draft = outcome.draft
                     qa_result = await qa_engine.validate(draft, plan, reader, analytics)
                     repair_log.append({
@@ -436,12 +436,18 @@ async def generate_report(
                     })
 
             if settings.qa_auto_repair:
+                if qa_result.has_critical_errors:
+                    await _converge()
                 tidied = tidy_draft(draft, qa_result)
                 if tidied != draft:
                     draft = tidied
                     qa_result = await qa_engine.validate(draft, plan, reader, analytics)
                     repair_log.append({"attempt": "tidy",
                                        "critical_after": len(qa_result.critical)})
+                    # Tidy's re-check can surface findings the earlier pass accepted;
+                    # give them the same rephrase-then-drop pass before the gate closes.
+                    if qa_result.has_critical_errors:
+                        await _converge()
 
             draft = replace(draft, metadata={
                 **draft.metadata,
