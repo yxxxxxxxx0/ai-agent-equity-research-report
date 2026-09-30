@@ -907,11 +907,7 @@ APP_HTML = """
   <div class="shell">
     <header class="brandbar">
       <div class="brand">
-        <img class="brand-logo" src="/assets/logo.png" alt="Megaannum">
-        <div>
-          <div class="brand-co">Megaannum Technology Limited</div>
-          <div class="brand-title">Equity Research Studio</div>
-        </div>
+        <div class="brand-title">Equity Research Studio</div>
       </div>
       <div class="tagline-top">Faster insights. Deeper decisions.</div>
     </header>
