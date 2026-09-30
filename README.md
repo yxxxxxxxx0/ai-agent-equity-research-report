@@ -70,8 +70,13 @@ clears the page; the finished files stay on disk (see section 6).
 
 **Read the result**
 
-- **3. Report Viewer**: switch between **Full Report** and **Compact Report**. If QA blocked the
-  run, the viewer says so instead of showing a PDF.
+- **3. Report Viewer** shows the finished report as a web page: sections, bullets, tables and
+  charts. **Click any bullet** (or a section's opening line) and a panel slides in from the
+  right showing where it comes from: the calculation with its formula and inputs, and each
+  source with its publisher, date, the extracted figure or excerpt, confidence and a link to the
+  original. Press Esc, click the dimmed page or the close button to dismiss it. The two buttons
+  above the report, **Full report (PDF)** and **Compact report (PDF)**, download the PDFs. If QA
+  blocked the run, the viewer says so and the buttons stay disabled.
 - **4. QA review** fills in when QA finishes (including for blocked runs):
   - badges for critical, warnings, info and repaired counts;
   - **Critical findings** and **Warnings**: the check name, section, message, and the

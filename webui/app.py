@@ -74,6 +74,7 @@ _load_dotenv(REPO_ROOT / ".env")
 
 from eq_report.config import Settings  # noqa: E402 (must follow dotenv load)
 from eq_report.domain.request import ResearchRequest  # noqa: E402
+from eq_report.evidence.store import EvidenceStore  # noqa: E402
 from eq_report.logging_setup import configure_logging  # noqa: E402
 from eq_report.llm import usage as usage_module  # noqa: E402
 from eq_report.pipeline import run_tracker as run_tracker_module  # noqa: E402
@@ -298,6 +299,8 @@ def _run_job(
         JOBS[job_id]["started_at"] = time.time()
     try:
         settings = Settings.from_env(output_dir=REPO_ROOT / "output_webui")
+        with _JOBS_LOCK:
+            JOBS[job_id]["db_path"] = str(settings.database_path)
         if model:
             settings = replace(settings, model=replace(settings.model, model=model))
         if resume_from:
@@ -465,6 +468,79 @@ def api_generate():
     return jsonify({"job_id": job_id})
 
 
+EVIDENCE_ID = re.compile(r"ev_[0-9a-f]{8,40}")
+ANALYTICS_ID = re.compile(r"an_[0-9a-f]{8,40}")
+
+
+def _report_path(job: dict | None) -> Path | None:
+    path = (((job or {}).get("artifacts") or {}).get("report_json") or {}).get("path")
+    return Path(path) if path and (job or {}).get("status") == "done" and Path(path).is_file() else None
+
+
+def _source_view(item) -> dict:
+    """What the UI's source panel shows about one evidence row."""
+    date = item.published_at or item.original_publication_date or item.as_of
+    return {
+        "evidence_id": item.evidence_id,
+        "type": item.source_type.value.replace("_", " "),
+        "source": item.original_source_name or item.source_name,
+        "title": item.document_title,
+        "url": item.original_source_url or item.source_url or item.retrieval_url,
+        "date": date.isoformat()[:10] if date else None,
+        "metric": item.metric, "raw_metric": item.raw_metric,
+        "value": item.value, "unit": item.unit, "currency": item.currency,
+        "period": item.period.label if item.period else None,
+        "raw_value": None if item.raw_value is None else str(item.raw_value)[:120],
+        "excerpt": (item.claim_text or "")[:1800],
+        "confidence": item.confidence.value, "status": item.status.value,
+        "provider": item.retrieval_provider,
+    }
+
+
+@app.route("/api/report/<job_id>", methods=["GET"])
+def api_report(job_id: str):
+    path = _report_path(JOBS.get(job_id))
+    if path is None:
+        return jsonify({"error": "report not available"}), 404
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.pop("qa", None)
+    return jsonify(payload)
+
+
+@app.route("/api/sources/<job_id>", methods=["GET"])
+def api_sources(job_id: str):
+    """The evidence and calculations behind one bullet (ids validated, capped)."""
+    job = JOBS.get(job_id)
+    path = _report_path(job)
+    if path is None or not job.get("db_path"):
+        return jsonify({"error": "report not available"}), 404
+    evidence_ids = [i for i in request.args.get("e", "").split(",") if EVIDENCE_ID.fullmatch(i)][:40]
+    analytics_ids = [i for i in request.args.get("a", "").split(",") if ANALYTICS_ID.fullmatch(i)][:20]
+    store = EvidenceStore(job["db_path"])
+    try:
+        evidence = [_source_view(item) for i in evidence_ids if (item := store.get(i)) is not None]
+        analytics = []
+        if analytics_ids:
+            try:
+                rows = json.loads((path.parent / "04_analytics.json").read_text(
+                    encoding="utf-8")).get("results", [])
+            except (OSError, ValueError):
+                rows = []
+            for row in rows:
+                if row.get("analytics_id") in analytics_ids:
+                    analytics.append({
+                        "label": row.get("label") or row.get("metric"), "value": row.get("value"),
+                        "unit": row.get("unit"), "formula": row.get("formula"),
+                        "inputs": row.get("inputs") or {}, "period": row.get("period"),
+                        "comparison_period": row.get("comparison_period"),
+                        "built_from": [_source_view(item) for i in (row.get("input_evidence_ids") or [])[:10]
+                                       if (item := store.get(i)) is not None],
+                    })
+    finally:
+        store.close()
+    return jsonify({"evidence": evidence, "analytics": analytics})
+
+
 @app.route("/api/models", methods=["GET"])
 def api_models():
     return jsonify({"models": _model_options()})
@@ -510,7 +586,8 @@ def job_document(job_id: str, kind: str):
     if not path.is_file():
         return "Document no longer exists.", 404
     mimetype = "application/pdf" if path.suffix.lower() == ".pdf" else "application/json"
-    return send_file(path, mimetype=mimetype, as_attachment=False)
+    download = request.args.get("download") == "1"
+    return send_file(path, mimetype=mimetype, as_attachment=download, download_name=path.name)
 
 
 # -- visual system --------------------------------------------------------
@@ -903,6 +980,85 @@ APP_STYLE = """
     .dd-price { font-family: var(--font-mono); font-size: 11.5px; font-weight: 500; color: var(--faint); white-space: nowrap; }
     .dd-item.selected .dd-price { color: #d99a78; }
     .dd-sep { height: 1px; background: #2c3553; margin: 5px 4px; }
+    .btn.dl { text-decoration: none; }
+    .btn.dl.disabled { opacity: 0.4; pointer-events: none; }
+    .viewer-pane.report {
+      display: block; overflow-y: auto; max-height: 82vh; padding: 26px 32px 34px; background: #10162a;
+    }
+    .rp-mast { display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+      border-bottom: 2px solid var(--blue); padding-bottom: 14px; }
+    .rp-co { font-size: 27px; font-weight: 800; letter-spacing: -0.02em; color: #fff; }
+    .rp-sub { color: var(--muted); font-size: 13.5px; margin-top: 2px; }
+    .rp-meta { text-align: right; font-size: 12.5px; color: var(--muted); line-height: 1.6; }
+    .rp-pill { display: inline-block; background: var(--navy); color: #fff; font-weight: 800; padding: 2px 11px; border-radius: 99px; font-size: 12px; }
+    .rp-hint { color: var(--faint); font-size: 12.5px; margin: 10px 0 0; }
+    .rp-sec { margin-top: 30px; }
+    .rp-h { display: flex; align-items: center; gap: 10px; font-size: 19px; font-weight: 800; color: #fff;
+      border-bottom: 1px solid var(--border); padding-bottom: 9px; margin: 0; }
+    .rp-n { flex: none; width: 26px; height: 26px; border-radius: 7px; background: var(--navy); color: #fff;
+      font-size: 13px; display: flex; align-items: center; justify-content: center; }
+    .rp-summary { font-style: italic; color: var(--ink-soft); margin: 12px 0 4px; padding: 8px 14px; border-radius: 10px; line-height: 1.6; font-size: 14.5px; }
+    .rp-list { list-style: none; padding: 0; margin: 6px 0 0; }
+    .rp-stmt { position: relative; padding: 10px 14px 10px 32px; margin: 3px 0; border-radius: 10px;
+      line-height: 1.62; font-size: 14.5px; color: var(--ink); }
+    .rp-click { cursor: pointer; transition: background 120ms; }
+    .rp-click:hover, .rp-click:focus-visible { background: #1d2540; outline: none; }
+    .rp-stmt.active { background: #2a1f2c; box-shadow: inset 3px 0 0 var(--blue); }
+    .rp-stmt::before { content: ""; position: absolute; left: 14px; top: 20px; width: 6px; height: 6px; border-radius: 50%; background: var(--blue); }
+    .rp-summary.rp-stmt::before { display: none; }
+    .rp-summary.rp-stmt { padding-left: 14px; }
+    .rp-tag { font-size: 10.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; color: var(--faint); margin-left: 6px; white-space: nowrap; }
+    .rp-ref { color: var(--blue); font-size: 12px; font-weight: 700; margin-left: 5px; white-space: nowrap; }
+    .rp-tt { font-size: 13px; font-weight: 800; color: var(--blue); margin: 18px 0 6px; }
+    .rp-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .rp-table th { background: var(--navy); color: #fff; text-align: left; padding: 7px 10px; font-weight: 700; }
+    .rp-table td { padding: 7px 10px; border-bottom: 1px solid var(--border); }
+    .rp-table tr:nth-child(even) td { background: #141b2e; }
+    .rp-table tr.emph td { font-weight: 800; color: #ffb98a; }
+    .rp-note { font-size: 11.5px; color: var(--faint); margin-top: 4px; }
+    .rp-chart { margin: 14px 0 4px; }
+    .rp-chart svg { width: 100%; height: auto; display: block; }
+    .rp-chart text { fill: var(--faint); font: 10px var(--font-ui); }
+    .rp-omit { margin-top: 26px; padding: 10px 14px; border: 1px dashed var(--border); border-radius: 10px; color: var(--muted); font-size: 13px; }
+    .rp-cites { margin: 10px 0 0; padding: 0; list-style: none; font-size: 12.5px; color: var(--ink-soft); }
+    .rp-cites li { padding: 5px 0; border-bottom: 1px solid var(--border); line-height: 1.5; }
+    .rp-cites b { color: var(--blue); margin-right: 6px; }
+    .rp-cites a { color: var(--faint); word-break: break-all; }
+
+    .src-backdrop { position: fixed; inset: 0; background: rgba(5, 8, 16, 0.55); opacity: 0; pointer-events: none; transition: opacity 240ms; z-index: 40; }
+    .src-backdrop.open { opacity: 1; pointer-events: auto; }
+    .src-panel {
+      position: fixed; top: 0; right: 0; bottom: 0; width: min(480px, 94vw); z-index: 50;
+      background: #141a2a; border-left: 1px solid #2c3553; box-shadow: -20px 0 50px rgba(0, 0, 0, 0.5);
+      transform: translateX(105%); transition: transform 300ms cubic-bezier(0.22, 1, 0.36, 1);
+      display: flex; flex-direction: column;
+    }
+    .src-panel.open { transform: translateX(0); }
+    .src-panel-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 20px 22px 14px; border-bottom: 1px solid var(--border); }
+    .src-eyebrow { font-size: 11px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; color: var(--blue); }
+    .src-heading { font-size: 17px; font-weight: 800; color: #fff; margin-top: 3px; }
+    .src-close { background: none; border: 1px solid var(--border); color: var(--muted); width: 32px; height: 32px; border-radius: 9px; font-size: 20px; line-height: 1; cursor: pointer; }
+    .src-close:hover { color: #fff; border-color: var(--blue); }
+    .src-panel-body { padding: 18px 22px 30px; overflow-y: auto; flex: 1; }
+    .src-quote { border-left: 3px solid var(--blue); background: #1b2236; border-radius: 0 10px 10px 0; padding: 12px 14px; font-size: 14px; line-height: 1.6; color: var(--ink); }
+    .src-tags { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0 4px; }
+    .src-tag { font-size: 10.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; padding: 3px 9px; border-radius: 99px; background: #222a40; color: var(--ink-soft); }
+    .src-tag.hot { background: var(--blue-soft); color: #ffb98a; }
+    .src-h { font-size: 11.5px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); margin: 22px 0 8px; }
+    .src-card { background: #1a2034; border: 1px solid #2c3553; border-radius: 12px; padding: 13px 15px; margin-bottom: 10px; }
+    .src-row { display: flex; justify-content: space-between; gap: 10px; font-size: 11.5px; color: var(--faint); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+    .src-title { font-size: 14px; font-weight: 700; color: #fff; margin: 6px 0 2px; line-height: 1.4; }
+    .src-data { font-family: var(--font-mono); font-size: 13px; color: #ffb98a; margin-top: 4px; }
+    .src-excerpt { margin: 9px 0 0; padding: 9px 12px; background: #141a2a; border-radius: 8px; font-size: 12.5px; line-height: 1.6; color: var(--ink-soft); max-height: 190px; overflow-y: auto; }
+    .src-link { display: inline-block; margin-top: 9px; font-size: 12.5px; font-weight: 700; color: var(--blue); text-decoration: none; word-break: break-all; }
+    .src-link:hover { text-decoration: underline; }
+    .src-plain { margin-top: 8px; font-size: 12px; color: var(--faint); word-break: break-all; }
+    .src-formula { font-family: var(--font-mono); font-size: 12.5px; color: var(--ink-soft); background: #141a2a; border-radius: 8px; padding: 8px 10px; margin-top: 8px; overflow-x: auto; white-space: pre-wrap; }
+    .src-inputs { width: 100%; margin-top: 8px; border-collapse: collapse; font-size: 12.5px; }
+    .src-inputs td { padding: 4px 0; border-bottom: 1px solid #2c3553; color: var(--ink-soft); }
+    .src-inputs td:last-child { text-align: right; font-family: var(--font-mono); color: #ffb98a; }
+    .src-empty { color: var(--muted); font-size: 13.5px; padding: 8px 0; }
+    .src-details > summary { cursor: pointer; font-size: 12.5px; font-weight: 700; color: var(--muted); margin-top: 10px; }
     .error-note, .qa-note { background: #2c1a1f; border-color: #5b2a33; color: #fca5a5; }
 """
 
@@ -1101,14 +1257,14 @@ APP_HTML = """
         <div class="viewer-head">
           <h2>3. Report Viewer</h2>
           <div class="toggle-group">
-            <button class="btn btn-toggle active" id="btn-full" onclick="selectViewer('full')">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
-              Full Report
-            </button>
-            <button class="btn btn-toggle" id="btn-compact" onclick="selectViewer('compact')">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
-              Compact Report
-            </button>
+            <a class="btn btn-toggle dl disabled" id="dl-full" href="#">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+              Full report (PDF)
+            </a>
+            <a class="btn btn-toggle dl disabled" id="dl-compact" href="#">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+              Compact report (PDF)
+            </a>
           </div>
         </div>
         <div class="viewer-pane" id="viewer-pane">
@@ -1137,11 +1293,19 @@ APP_HTML = """
     </div>
   </div>
 
+  <div class="src-backdrop" id="src-backdrop" onclick="closeSources()"></div>
+  <aside class="src-panel" id="src-panel" aria-hidden="true" aria-label="Sources for the selected statement">
+    <div class="src-panel-head">
+      <div><div class="src-eyebrow">Sources</div><div class="src-heading" id="src-heading"></div></div>
+      <button type="button" class="src-close" onclick="closeSources()" aria-label="Close">&times;</button>
+    </div>
+    <div class="src-panel-body" id="src-body"></div>
+  </aside>
+
   <script>
     const STEP_GROUPS = """ + json.dumps([[key, title, desc, list(stages)]
                                             for key, title, desc, stages in STEP_GROUPS]) + """;
     let jobId = """ + "{{ initial_job_id | tojson }}" + """;
-    let viewerMode = "full";
     let pollTimer = null;
     let tickTimer = null;
     let MODELS = [];
@@ -1405,33 +1569,154 @@ APP_HTML = """
       tokensEl.textContent = total ? total.toLocaleString() : "—";
     }
 
-    function selectViewer(mode) {
-      viewerMode = mode;
-      document.getElementById("btn-full").classList.toggle("active", mode === "full");
-      document.getElementById("btn-compact").classList.toggle("active", mode === "compact");
-      renderViewer(window.__lastJob || null);
+    // ---- download buttons -------------------------------------------------------
+    function updateDownloads(job) {
+      const arts = (job && job.artifacts) || {};
+      [["dl-full", "full_pdf"], ["dl-compact", "compact_pdf"]].forEach(pair => {
+        const el = document.getElementById(pair[0]);
+        const ok = job && job.status === "done" && arts[pair[1]];
+        el.classList.toggle("disabled", !ok);
+        el.href = ok ? `/document/${jobId}/${pair[1]}?download=1` : "#";
+      });
+    }
+
+    // ---- the report, as HTML ------------------------------------------------------
+    function fmtRefs(refs) {
+      const n = [...new Set(refs || [])].sort((a, b) => a - b);
+      const out = [];
+      let i = 0;
+      while (i < n.length) {
+        let j = i;
+        while (j + 1 < n.length && n[j + 1] === n[j] + 1) j++;
+        const run = n.slice(i, j + 1);
+        out.push(run.length === 1 ? `[${run[0]}]` : run.length === 2 ? `[${run[0]}][${run[1]}]`
+          : `[${run[0]}]-[${run[run.length - 1]}]`);
+        i = j + 1;
+      }
+      return out.join("");
+    }
+
+    function fmtNum(v) {
+      const a = Math.abs(v);
+      if (a >= 1e12) return (v / 1e12).toFixed(2) + "T";
+      if (a >= 1e9) return (v / 1e9).toFixed(2) + "B";
+      if (a >= 1e6) return (v / 1e6).toFixed(2) + "M";
+      if (a >= 1e3) return (v / 1e3).toFixed(1) + "K";
+      return Number.isInteger(v) ? String(v) : v.toFixed(2);
+    }
+
+    function fmtValue(v, unit, cur) {
+      if (v == null) return "";
+      if (unit === "pct") return v.toFixed(1) + "%";
+      if (unit === "x") return v.toFixed(1) + "x";
+      if (unit === "pp") return v.toFixed(1) + " pp";
+      if (unit === "USD/share") return "$" + v.toFixed(2);
+      if (unit === "count") return Math.round(v).toLocaleString();
+      return (cur === "USD" || unit === "USD" ? "$" : "") + fmtNum(v) + (cur && cur !== "USD" ? " " + cur : "");
+    }
+
+    function chartSVG(c) {
+      const v = c.values || [];
+      if (!v.length) return "";
+      const W = 640, H = 210, L = 52, R = 12, T = 12, B = 28;
+      const lo = c.chart_type === "bar" ? Math.min(0, ...v) : Math.min(...v);
+      const hi = Math.max(...v);
+      const span = (hi - lo) || 1;
+      const y = val => T + (H - T - B) * (1 - (val - lo) / span);
+      const cats = c.categories || [];
+      let shapes = "";
+      if (c.chart_type === "bar") {
+        const step = (W - L - R) / v.length;
+        shapes = v.map((val, i) => `<rect x="${(L + i * step + step * 0.18).toFixed(1)}" y="${Math.min(y(val), y(0)).toFixed(1)}" width="${(step * 0.64).toFixed(1)}" height="${Math.abs(y(val) - y(0)).toFixed(1)}" rx="3" fill="#e0672a"></rect>`).join("");
+      } else {
+        const step = (W - L - R) / Math.max(v.length - 1, 1);
+        const pts = v.map((val, i) => `${(L + i * step).toFixed(1)},${y(val).toFixed(1)}`).join(" ");
+        shapes = `<polygon points="${L},${H - B} ${pts} ${(L + (v.length - 1) * step).toFixed(1)},${H - B}" fill="rgba(224,103,42,0.14)"></polygon>
+          <polyline points="${pts}" fill="none" stroke="#f0803c" stroke-width="2"></polyline>`;
+      }
+      const xl = cats.length ? [0, Math.floor((cats.length - 1) / 2), cats.length - 1] : [];
+      const xt = [...new Set(xl)].map((i, k, arr) => `<text x="${L + (W - L - R) * (cats.length > 1 ? i / (cats.length - 1) : 0.5)}" y="${H - 8}" text-anchor="${k === 0 ? "start" : k === arr.length - 1 ? "end" : "middle"}">${esc(cats[i])}</text>`).join("");
+      return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(c.title)}">
+        <line x1="${L}" y1="${H - B}" x2="${W - R}" y2="${H - B}" stroke="#36405e"></line>
+        <line x1="${L}" y1="${T}" x2="${L}" y2="${H - B}" stroke="#36405e"></line>
+        <text x="${L - 6}" y="${T + 8}" text-anchor="end">${esc(fmtNum(hi))}</text>
+        <text x="${L - 6}" y="${H - B}" text-anchor="end">${esc(fmtNum(lo))}</text>${shapes}${xt}</svg>`;
+    }
+
+    function tableHTML(tb) {
+      const n = tb.columns.length;
+      const keep = tb.columns.map((_, ci) => ci === 0 || tb.rows.some(r => (r.cells[ci - 1] || "") !== ""));
+      const head = tb.columns.map((c, ci) => keep[ci] ? `<th>${esc(c)}</th>` : "").join("");
+      const rows = tb.rows.map(r => {
+        const cells = [r.label, ...r.cells];
+        return `<tr class="${r.emphasis ? "emph" : ""}">` + cells.map((c, ci) => keep[ci] ? `<td>${esc(c)}</td>` : "").join("") + `</tr>`;
+      }).join("");
+      return `<div class="rp-tt">${esc(tb.title)}</div><table class="rp-table"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>
+        ${tb.note ? `<div class="rp-note">${esc(tb.note)}</div>` : ""}`;
+    }
+
+    function renderReportHTML(d) {
+      const md = d.metadata || {};
+      const head = `<div class="rp-mast">
+          <div><div class="rp-co">${esc(d.company)}</div><div class="rp-sub">${esc(d.title)}</div></div>
+          <div class="rp-meta">${d.ticker ? `<span class="rp-pill">${esc(d.ticker)}</span>` : ""}
+            <div>Report date <b>${esc(d.report_date)}</b></div>
+            ${md.latest_reported_period ? `<div>Latest period <b>${esc(md.latest_reported_period)}</b></div>` : ""}
+            <div>Run ${esc(d.report_run_id)}</div></div></div>
+        <p class="rp-hint">Click any bullet to open its sources.</p>`;
+      let num = 0;
+      const body = d.sections.map((s, si) => {
+        if (s.section === "sources") return "";
+        num += 1;
+        const hasSummarySrc = (s.summary_evidence_ids || []).length || (s.summary_analytics_ids || []).length;
+        const summary = s.summary ? `<div class="rp-summary rp-stmt ${hasSummarySrc ? "rp-click" : ""}" ${hasSummarySrc ? `tabindex="0" data-sec="${si}" data-i="s"` : ""}>${esc(s.summary)}<span class="rp-ref">${fmtRefs(s.summary_citation_refs)}</span></div>` : "";
+        const items = s.statements.map((st, i) => {
+          const has = (st.evidence_ids || []).length || (st.analytics_ids || []).length;
+          return `<li class="rp-stmt ${has ? "rp-click" : ""}" ${has ? `tabindex="0" data-sec="${si}" data-i="${i}"` : ""}>${esc(st.text)}<span class="rp-tag">(${esc((st.claim_type || "").replace(/_/g, " "))})</span><span class="rp-ref">${fmtRefs(st.citation_refs)}</span></li>`;
+        }).join("");
+        const paras = (s.paragraphs || []).map(pg => `<p class="rp-summary">${esc(pg)}</p>`).join("");
+        const charts = (s.charts || []).map(c => `<div class="rp-chart"><div class="rp-tt">${esc(c.title)}${c.unit ? " (" + esc(c.unit) + ")" : ""}</div>${chartSVG(c)}</div>`).join("");
+        return `<section class="rp-sec"><h3 class="rp-h"><span class="rp-n">${num}</span>${esc(s.title)}</h3>
+          ${summary}${paras}<ul class="rp-list">${items}</ul>${(s.tables || []).map(tableHTML).join("")}${charts}</section>`;
+      }).join("");
+      const omitted = (md.sections_omitted || []);
+      const omit = omitted.length ? `<div class="rp-omit"><b>Left out:</b> ${omitted.map(o => esc((o.section || "").replace(/_/g, " ")) + " (" + esc(o.reason || "") + ")").join("; ")}</div>` : "";
+      const cites = (d.citations || []).map(c => `<li id="cite-${c.ref_number}"><b>[${c.ref_number}]</b>${esc(c.text)}${c.source_url ? `<br>${(c.source_url.startsWith("http://") || c.source_url.startsWith("https://")) ? `<a href="${esc(c.source_url)}" target="_blank" rel="noopener">${esc(c.source_url)}</a>` : esc(c.source_url)}` : ""}</li>`).join("");
+      return head + body + omit + (cites ? `<section class="rp-sec"><h3 class="rp-h"><span class="rp-n">${num + 1}</span>Sources</h3><ol class="rp-cites" style="list-style:none">${cites}</ol></section>` : "");
     }
 
     function renderViewer(job) {
       const pane = document.getElementById("viewer-pane");
-      const artifacts = (job && job.artifacts) || {};
-      const key = viewerMode === "full" ? "full_pdf" : "compact_pdf";
-      if (job && job.status === "done" && artifacts[key]) {
-        pane.innerHTML = `<embed src="/document/${jobId}/${key}" type="application/pdf">`;
-      } else if (job && job.status === "failed") {
+      updateDownloads(job);
+      const arts = (job && job.artifacts) || {};
+      if (job && job.status === "done" && arts.report_json) {
+        if (pane.dataset.report === jobId) return;
+        pane.dataset.report = jobId;
+        pane.className = "viewer-pane report";
+        pane.innerHTML = `<div class="viewer-empty"><div class="small">Loading report&hellip;</div></div>`;
+        fetch(`/api/report/${jobId}`).then(r => r.json()).then(data => {
+          window.__report = data;
+          pane.innerHTML = renderReportHTML(data);
+          pane.scrollTop = 0;
+        }).catch(() => { pane.innerHTML = `<div class="viewer-empty"><div class="small">The report could not be loaded.</div></div>`; });
+        return;
+      }
+      pane.dataset.report = "";
+      pane.className = "viewer-pane";
+      if (job && job.status === "failed") {
         const qaMsg = job.qa_critical
           ? `QA blocked publication: ${job.qa_critical} critical finding(s), ${job.qa_warnings} warning(s).`
           : (job.error || "The run failed.");
         pane.innerHTML = `<div class="viewer-empty">
           <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
           <div class="big">This report could not be completed</div>
-          <div class="small">${qaMsg.replace(/</g, "&lt;")}</div>
+          <div class="small">${esc(qaMsg)}</div>
         </div>`;
       } else if (job) {
         pane.innerHTML = `<div class="viewer-empty">
           <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
           <div class="big">Generating your report&hellip;</div>
-          <div class="small">${job.ticker} &middot; this can take several minutes.</div>
+          <div class="small">${esc(job.ticker || "")} &middot; this can take several minutes.</div>
         </div>`;
       } else {
         pane.innerHTML = `<div class="viewer-empty">
@@ -1441,6 +1726,82 @@ APP_HTML = """
         </div>`;
       }
     }
+
+    // ---- the slide-in source panel -------------------------------------------------
+    function sourceCard(e) {
+      const isHttp = e.url && (e.url.startsWith("http://") || e.url.startsWith("https://"));
+      const what = e.metric ? `${(e.metric || "").replace(/_/g, " ")}: ${fmtValue(e.value, e.unit, e.currency)}${e.period ? "  (" + e.period + ")" : ""}` : "";
+      return `<div class="src-card">
+        <div class="src-row"><span>${esc(e.type)}</span><span>${esc(e.date || "")}</span></div>
+        <div class="src-title">${esc(e.title || e.source)}</div>
+        ${e.title && e.source && e.title !== e.source ? `<div class="src-plain" style="margin:0">${esc(e.source)}</div>` : ""}
+        ${what ? `<div class="src-data">${esc(what)}</div>` : ""}
+        ${e.excerpt ? `<div class="src-excerpt">${esc(e.excerpt)}</div>` : ""}
+        ${isHttp ? `<a class="src-link" href="${esc(e.url)}" target="_blank" rel="noopener">Open source &#8599;</a>` : (e.url ? `<div class="src-plain">${esc(e.url)}</div>` : "")}
+        <div class="src-tags"><span class="src-tag">${esc(e.confidence)} confidence</span>${e.provider ? `<span class="src-tag">${esc(e.provider)}</span>` : ""}</div>
+      </div>`;
+    }
+
+    function analyticsCard(a) {
+      const inputs = Object.entries(a.inputs || {}).map(kv => `<tr><td>${esc(kv[0].replace(/_/g, " "))}</td><td>${esc(fmtNum(kv[1]))}</td></tr>`).join("");
+      return `<div class="src-card">
+        <div class="src-row"><span>Calculation</span><span>${esc(a.period || "")}${a.comparison_period ? " vs " + esc(a.comparison_period) : ""}</span></div>
+        <div class="src-title">${esc(a.label || "")}</div>
+        <div class="src-data">${esc(fmtValue(a.value, a.unit, null))}</div>
+        ${a.formula ? `<div class="src-formula">${esc(a.formula)}</div>` : ""}
+        ${inputs ? `<table class="src-inputs">${inputs}</table>` : ""}
+        ${(a.built_from || []).length ? `<details class="src-details"><summary>Built from ${a.built_from.length} source${a.built_from.length === 1 ? "" : "s"}</summary>${a.built_from.map(sourceCard).join("")}</details>` : ""}
+      </div>`;
+    }
+
+    function closeSources() {
+      document.getElementById("src-panel").classList.remove("open");
+      document.getElementById("src-panel").setAttribute("aria-hidden", "true");
+      document.getElementById("src-backdrop").classList.remove("open");
+      document.querySelectorAll(".rp-stmt.active").forEach(el => el.classList.remove("active"));
+    }
+
+    async function openSources(si, i) {
+      const s = window.__report.sections[si];
+      const st = i === "s"
+        ? {text: s.summary, evidence_ids: s.summary_evidence_ids || [], analytics_ids: s.summary_analytics_ids || [], citation_refs: s.summary_citation_refs || [], claim_type: "summary", confidence: ""}
+        : s.statements[Number(i)];
+      document.querySelectorAll(".rp-stmt.active").forEach(el => el.classList.remove("active"));
+      const row = document.querySelector(`.rp-stmt[data-sec="${si}"][data-i="${i}"]`);
+      if (row) row.classList.add("active");
+      const panel = document.getElementById("src-panel");
+      const body = document.getElementById("src-body");
+      document.getElementById("src-heading").textContent = s.title;
+      const quote = `<div class="src-quote">${esc(st.text)}</div>
+        <div class="src-tags"><span class="src-tag hot">${esc((st.claim_type || "").replace(/_/g, " "))}</span>
+        ${st.confidence ? `<span class="src-tag">${esc(st.confidence)} confidence</span>` : ""}
+        ${(st.citation_refs || []).length ? `<span class="src-tag">${esc(fmtRefs(st.citation_refs))}</span>` : ""}</div>`;
+      body.innerHTML = quote + `<div class="src-empty">Loading sources&hellip;</div>`;
+      panel.classList.add("open");
+      panel.setAttribute("aria-hidden", "false");
+      document.getElementById("src-backdrop").classList.add("open");
+      try {
+        const res = await fetch(`/api/sources/${jobId}?e=${encodeURIComponent((st.evidence_ids || []).join(","))}&a=${encodeURIComponent((st.analytics_ids || []).join(","))}`);
+        const data = await res.json();
+        let html = quote;
+        if ((data.analytics || []).length) html += `<div class="src-h">Calculation</div>` + data.analytics.map(analyticsCard).join("");
+        if ((data.evidence || []).length) html += `<div class="src-h">Sources (${data.evidence.length})</div>` + data.evidence.map(sourceCard).join("");
+        if (!(data.analytics || []).length && !(data.evidence || []).length) html += `<div class="src-empty">No source rows were found for this statement.</div>`;
+        body.innerHTML = html;
+      } catch (err) {
+        body.innerHTML = quote + `<div class="src-empty">The sources could not be loaded.</div>`;
+      }
+    }
+
+    document.addEventListener("click", e => {
+      const el = e.target.closest && e.target.closest("#viewer-pane [data-i]");
+      if (el) openSources(el.dataset.sec, el.dataset.i);
+    });
+    document.addEventListener("keydown", e => {
+      if (e.key === "Escape") closeSources();
+      if (e.key === "Enter" && document.activeElement && document.activeElement.dataset && document.activeElement.dataset.i !== undefined
+          && document.activeElement.closest("#viewer-pane")) openSources(document.activeElement.dataset.sec, document.activeElement.dataset.i);
+    });
 
     function esc(s) {
       return String(s == null ? "" : s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
