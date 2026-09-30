@@ -844,6 +844,38 @@ APP_STYLE = """
     .qa-arrow { color: var(--faint); margin: 0 4px; }
     .fc-node { border-radius: 8px; box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05); }
     .map-card .hint { max-width: 760px; }
+
+    /* ---- Midnight: the page's dark theme (palette overrides, later rules win) ---- */
+    :root {
+      color-scheme: dark;
+      --page-bg: #0f1420; --card-bg: #171d2c; --border: #283048;
+      --ink: #e9edf7; --ink-soft: #c3cadb; --muted: #9aa4bd; --faint: #6f7a96;
+      --navy: #e0672a; --blue: #f0803c; --blue-soft: #2b2233; --blue-ring: #5a3a2c;
+      --step-line: #283048; --hairline: #283048;
+      --pos: #34d399; --pos-bg: #0f2a24; --neg-border: #f87171; --neg-bg: #2c1a1f; --neg-ink: #fca5a5;
+    }
+    body { background: radial-gradient(1200px 520px at 15% -10%, #2b1c20 0, #0f1420 62%) fixed; }
+    .card, .stat { box-shadow: none; }
+    .ticker-field, .select-wrap, .model-custom, .viewer-pane { background: #10162a; }
+    .btn-toggle { background: #171d2c; color: #c3cadb; }
+    .btn-toggle.active { background: #e0672a; border-color: #e0672a; color: #fff; }
+    .btn-primary { background: linear-gradient(180deg, #f0803c, #d65a1f); box-shadow: 0 4px 16px rgba(240, 128, 60, 0.3); }
+    .btn-primary:hover { background: linear-gradient(180deg, #f58d4d, #e0672a); }
+    .brand-title { color: #fff; }
+    .qa-group { background: #171d2c; }
+    .qa-subject { background: #131a2b; }
+    .qa-check { background: #222a40; color: #c3cadb; }
+    .badge.warn { background: #3a2d12; color: #f5d38a; border-color: #5b4820; }
+    .badge.info { background: #222a40; color: #c3cadb; }
+    .badge.crit { border-color: #5b2a33; }
+    .badge.fix { color: #ffb98a; }
+    .qa-group.warn > summary { background: #33290f; color: #f5d38a; }
+    .qa-group.fix > summary { background: #2b2233; color: #ffb98a; }
+    .fc-node.done { background: #0f2a24; }
+    .fc-node.current, .fc-node.fc-gate { background: #3a2418; }
+    .fc-time { background: transparent; }
+    .step-dot { background: var(--card-bg); }
+    .error-note, .qa-note { background: #2c1a1f; border-color: #5b2a33; color: #fca5a5; }
 """
 
 # Absolute-positioned nodes + an SVG line layer, laid out to match the
