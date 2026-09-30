@@ -18,9 +18,7 @@ python -m eq_report --ticker NVDA --report-date 2026-09-02
 > The report is a neutral analysis, not investment research: no
 > Buy/Hold/Sell view, no price target, no bull/base/bear thesis, and no claim
 > that a valuation is justified or unjustified - see "Neutral wording and
-> analytical discipline" below for how that is enforced. `docs/PENDING_CHANGES.md`
-> tracks a larger redesign in progress, split into what has shipped and what
-> is still deferred.
+> analytical discipline" below for how that is enforced.
 
 Planning, the segment agents, synthesis and QA can use a **GPT-backed model
 called through OpenRouter** whenever `EQR_MODEL_API_KEY` is set (see section
@@ -129,9 +127,7 @@ segment agent are constructed with an `EvidenceReader` and nothing else — no
 provider, no HTTP client, no `requests` import anywhere downstream of it. The
 architecture the spec forbids (`Segment Agent → external API → unsupported
 claim`) is not merely discouraged here; there is no object in scope that could
-do it. `tests/test_pipeline_e2e.py::test_agents_read_only_from_the_evidence_store`
-hands the agents an empty store and asserts they produce data gaps rather than
-content.
+do it.
 
 **Claim-to-source map.** Every printed factual sentence has its own lineage.
 This is an internal support map, not a requirement that source prose be copied
@@ -238,12 +234,9 @@ eq_report/
     ├── orchestrator.py              # 11. generate_report() — the single entry point
     └── run_tracker.py               # 12. ReportRun assembly and stage timing
 
-examples/         nvidia_request.json — a structured request
+webui/app.py      local web UI: ticker + model picker, live workflow map, QA review
 output/runs/<id>/ per-run artefacts (see §4)
 ```
-
-The repository includes a maintained `tests/` suite covering normalisation,
-analytics, evidence provenance, synthesis, QA, web verification and rendering.
 
 ---
 
@@ -444,10 +437,8 @@ asserting that.
 
 Exit code is `0` on success, `1` if QA blocked the PDF or a stage failed.
 Statement-scoped QA errors are repaired and rechecked automatically within the
-same run; see [QA authority and automatic repair](docs/QA_REPAIR.md) for the
-deterministic/LLM boundary and the remaining hard-block conditions.
-The complete per-stage authority map and opt-in flags are in
-[Deterministic and LLM execution authority](docs/EXECUTION_AUTHORITY.md).
+same run (see "QA repair loop and triage" in section 4 for the deterministic/LLM
+boundary and the remaining hard-block conditions).
 
 ### 5a. Optional GPT-backed stages (OpenRouter)
 
@@ -504,18 +495,7 @@ Section titles, layout labels and page footers are template text rather than
 company claims. Every factual compact-report bullet must map back to the same
 source-supported statement used by the full report.
 
-## 6. Tests
-
-The checkout includes automated tests for normalisation, analytics, the
-evidence store, synthesis, QA repair, web-claim verification, claim-to-source
-entailment, compact rendering and pipeline behavior. Run them with:
-
-```bash
-pytest -q
-python -m ruff check --select F,E,W,I --line-length 100 eq_report
-```
-
-## 7. Example user request
+## 6. Example user request
 
 ```json
 {
@@ -536,7 +516,7 @@ Only `company` is mandatory. The planner resolved `NVDA` from the name and
 applied the default peer set `AMD, INTC, AVGO`, recording both as plan notes.
 Each `focus` entry became a top-priority research question and a monitored item.
 
-## 8. Example generated report
+## 7. Example generated report
 
 `python -m eq_report --ticker NVDA --report-date 2026-09-02` →
 7-page PDF, 11 sections, 66 statements, 3 metric tables, 1 chart, 76 citations,
@@ -635,10 +615,7 @@ failure can let judgmental language through:
    unsupported causal marker; `check_judgmental_language` (new) flags
    investment-judgment language directly. Neither blocks the PDF (both are
    WARNING severity) since wording style is not a provenance failure, but
-   both are visible in the QA trail printed in the back matter.
-
-See `docs/PENDING_CHANGES.md` for the larger neutral-analysis redesign this
-is part of, including what is deferred.
+   both are visible in the web UI's QA review section.
 
 ### Annotated companion PDF
 
@@ -663,7 +640,7 @@ for any period. Impact: The financial performance section cannot be written.")
 and **zero invented numbers**. There is a test asserting that every statement in
 that run still carries evidence or analytics references.
 
-## 9. Runtime boundaries
+## 8. Runtime boundaries
 
 | Component | Status | Notes |
 |---|---|---|
@@ -672,7 +649,7 @@ that run still carries evidence or analytics references.
 | `EvidenceReader.documents_matching` | **substring keyword match** | Deliberately transparent. The natural place for embeddings later; no agent would change. |
 | LLM usage | **on whenever `EQR_MODEL_API_KEY` is set** | Planning, metric-label mapping and value rescue in normalisation, the analytics cross-check, segment agents, synthesis, QA entailment, the QA auditor, triage and repair all go through `ModelConfig`. Agents and synthesis may only cite ids they were shown; every LLM output is verified by code and each stage falls back to its deterministic logic. With no key, behaviour is a fully deterministic run. |
 
-## 10. Next components to productionise
+## 9. Next components to productionise
 
 In the order I would tackle them.
 
