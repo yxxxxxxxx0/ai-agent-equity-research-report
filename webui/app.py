@@ -31,8 +31,10 @@ import sys
 import threading
 import time
 import traceback
+import urllib.request
 import uuid
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 
 from flask import (
@@ -79,6 +81,56 @@ from eq_report.pipeline.orchestrator import generate_report_sync  # noqa: E402
 from eq_report.pipeline.run_tracker import RUN_ID_PATTERN  # noqa: E402
 
 TICKER_PATTERN = re.compile(r"[A-Z0-9.\-]{1,10}")
+MODEL_PATTERN = re.compile(r"[a-z0-9][\w.\-]*/[\w.\-:]+")
+
+# Models offered in the picker, cheapest-to-strongest within each lab. Prices
+# and availability come live from OpenRouter; an id it no longer lists is hidden.
+CURATED_MODELS = (
+    "openai/gpt-5.6-luna", "openai/gpt-5.6-sol", "openai/gpt-5.6-terra", "openai/gpt-5.5",
+    "anthropic/claude-haiku-4.5", "anthropic/claude-sonnet-5.5", "anthropic/claude-opus-5.5",
+    "google/gemini-3.8-flash", "google/gemini-3.1-pro-preview", "x-ai/grok-4.7",
+    "deepseek/deepseek-v4-pro", "qwen/qwen3.8-max-0902",
+)
+_MODEL_CACHE: dict = {"at": 0.0, "live": None}
+
+
+def _live_models() -> dict[str, dict] | None:
+    """OpenRouter's model list keyed by id, cached for an hour; None if unreachable."""
+    if time.time() - _MODEL_CACHE["at"] < 3600 and _MODEL_CACHE["live"] is not None:
+        return _MODEL_CACHE["live"]
+    try:
+        with urllib.request.urlopen("https://openrouter.ai/api/v1/models", timeout=8) as response:
+            rows = json.load(response)["data"]
+    except Exception:  # noqa: BLE001 - the picker degrades to the curated list
+        return _MODEL_CACHE["live"]
+    _MODEL_CACHE.update(at=time.time(), live={row["id"]: row for row in rows})
+    return _MODEL_CACHE["live"]
+
+
+def _model_options() -> list[dict]:
+    live = _live_models()
+    default = Settings.from_env().model.model
+    ids = list(dict.fromkeys((default, *CURATED_MODELS)))
+    options = []
+    for model_id in ids:
+        row = (live or {}).get(model_id)
+        if live is not None and row is None:
+            continue
+        pricing = (row or {}).get("pricing") or {}
+        try:
+            price = [round(float(pricing[k]) * 1e6, 2) for k in ("prompt", "completion")]
+        except (KeyError, TypeError, ValueError):
+            price = None
+        options.append({"id": model_id, "name": (row or {}).get("name") or model_id,
+                        "price": price, "default": model_id == default})
+    return options
+
+
+def _valid_model(model: str) -> bool:
+    if not MODEL_PATTERN.fullmatch(model):
+        return False
+    live = _live_models()
+    return live is None or model in live
 
 app = Flask(__name__)
 
@@ -200,7 +252,7 @@ configure_logging("INFO")  # lock in handlers now so per-run calls don't reset t
 
 def _run_job(
     job_id: str, ticker: str | None, report_date: dt.date | None,
-    resume_from: str | None = None,
+    resume_from: str | None = None, model: str | None = None,
 ) -> None:
     _THREAD_JOB[threading.get_ident()] = job_id
     _JOB_CTX.set(job_id)
@@ -209,6 +261,8 @@ def _run_job(
         JOBS[job_id]["started_at"] = time.time()
     try:
         settings = Settings.from_env(output_dir=REPO_ROOT / "output_webui")
+        if model:
+            settings = replace(settings, model=replace(settings.model, model=model))
         if resume_from:
             # Re-runs analysis/synthesis/QA/rendering against that run's
             # already-persisted plan and Evidence Store rows - no planning
@@ -298,6 +352,7 @@ def _run_job(
 
 def _start_job(
     ticker: str | None, report_date: dt.date | None, *, resume_from: str | None = None,
+    model: str | None = None,
 ) -> str:
     job_id = uuid.uuid4().hex[:8]
     with _JOBS_LOCK:
@@ -305,6 +360,7 @@ def _start_job(
             "ticker": ticker or (f"Resuming {resume_from}" if resume_from else ""),
             "report_date": report_date.isoformat() if report_date else None,
             "resume_from": resume_from,
+            "model": model or Settings.from_env().model.model,
             "status": "queued",
             "active_stages": [],
             "completed_stages": [],
@@ -313,7 +369,7 @@ def _start_job(
             "stage_durations_ms": {},
         }
     threading.Thread(
-        target=_run_job, args=(job_id, ticker, report_date, resume_from), daemon=True).start()
+        target=_run_job, args=(job_id, ticker, report_date, resume_from, model), daemon=True).start()
     return job_id
 
 
@@ -325,10 +381,13 @@ def index():
 @app.route("/generate", methods=["POST"])
 def generate():
     resume_from = request.form.get("resume_from", "").strip()
+    model = request.form.get("model", "").strip() or None
+    if model and not _valid_model(model):
+        return redirect(url_for("index"))
     if resume_from:
         if not RUN_ID_PATTERN.fullmatch(resume_from):
             return redirect(url_for("index"))
-        job_id = _start_job(None, None, resume_from=resume_from)
+        job_id = _start_job(None, None, resume_from=resume_from, model=model)
         return redirect(url_for("job_page", job_id=job_id))
     ticker = request.form.get("ticker", "").strip().upper()
     date_str = request.form.get("report_date", "").strip()
@@ -338,7 +397,7 @@ def generate():
         report_date = dt.date.fromisoformat(date_str) if date_str else dt.date.today()
     except ValueError:
         report_date = dt.date.today()
-    job_id = _start_job(ticker, report_date)
+    job_id = _start_job(ticker, report_date, model=model)
     return redirect(url_for("job_page", job_id=job_id))
 
 
@@ -346,11 +405,15 @@ def generate():
 def api_generate():
     payload = request.get_json(silent=True) or {}
     resume_from = str(payload.get("resume_from", "")).strip()
+    model = str(payload.get("model", "")).strip() or None
+    if model and not _valid_model(model):
+        return jsonify({"error": f"unknown model {model!r}; pick one from the list or "
+                                 "enter an exact OpenRouter model id"}), 400
     if resume_from:
         if not RUN_ID_PATTERN.fullmatch(resume_from):
             return jsonify({"error": "resume_from must be a run id like "
                                      "run_20260929T060809_f9cebb"}), 400
-        job_id = _start_job(None, None, resume_from=resume_from)
+        job_id = _start_job(None, None, resume_from=resume_from, model=model)
         return jsonify({"job_id": job_id})
     ticker = str(payload.get("ticker", "")).strip().upper()
     if not TICKER_PATTERN.fullmatch(ticker):
@@ -360,8 +423,19 @@ def api_generate():
         report_date = dt.date.fromisoformat(date_str) if date_str else dt.date.today()
     except ValueError:
         report_date = dt.date.today()
-    job_id = _start_job(ticker, report_date)
+    job_id = _start_job(ticker, report_date, model=model)
     return jsonify({"job_id": job_id})
+
+
+@app.route("/api/models", methods=["GET"])
+def api_models():
+    return jsonify({"models": _model_options()})
+
+
+@app.route("/assets/logo.png", methods=["GET"])
+def logo():
+    return send_file(REPO_ROOT / "eq_report" / "rendering" / "assets" / "megaannum_logo.png",
+                     mimetype="image/png", max_age=86400)
 
 
 @app.route("/job/<job_id>", methods=["GET"])
@@ -565,8 +639,8 @@ APP_STYLE = """
        tracker above uses. */
     .map-card { margin-top: 18px; }
     .fc-scroll { overflow-x: auto; }
-    .fc-wrap { position: relative; width: 680px; height: 700px; margin: 0 auto; }
-    .fc-svg { position: absolute; top: 0; left: 0; width: 680px; height: 700px; pointer-events: none; }
+    .fc-wrap { position: relative; width: 680px; height: 716px; margin: 0 auto; }
+    .fc-svg { position: absolute; top: 0; left: 0; width: 680px; height: 716px; pointer-events: none; }
     .fc-node {
       position: absolute; border: 1px solid var(--hairline); background: var(--paper);
       border-radius: 4px; padding: 8px 11px; display: flex; flex-direction: column;
@@ -623,6 +697,79 @@ APP_STYLE = """
     .t-item { display: flex; align-items: baseline; gap: 6px; }
     .t-k { font-size: 10.5px; font-weight: 700; color: var(--faint); text-transform: uppercase; letter-spacing: 0.06em; }
     .t-v { font-size: 15px; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
+
+    /* ---- refresh: brand header, stat cards, model picker, softer surfaces ---- */
+    body { background: linear-gradient(180deg, #fbeee4 0, var(--page-bg) 360px) fixed; }
+    .shell { padding-top: 26px; }
+    .brandbar {
+      display: flex; align-items: center; justify-content: space-between; gap: 14px;
+      flex-wrap: wrap; margin-bottom: 20px;
+    }
+    .brand { display: flex; align-items: center; gap: 14px; }
+    .brand-logo {
+      width: 56px; height: 56px; border-radius: 14px; background: #fff; padding: 4px;
+      box-shadow: 0 6px 18px rgba(143, 53, 11, 0.18), 0 0 0 1px rgba(143, 53, 11, 0.08);
+    }
+    .brand-co {
+      font-size: 11px; font-weight: 800; letter-spacing: 0.16em; text-transform: uppercase;
+      color: var(--blue);
+    }
+    .brand-title { font-size: 26px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.15; }
+    .tagline-top { font-size: 13.5px; color: var(--muted); font-style: italic; }
+
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 22px; }
+    @media (max-width: 860px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+    .stat {
+      background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px;
+      padding: 12px 16px; display: flex; flex-direction: column; gap: 3px;
+      box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04); min-width: 0;
+    }
+    .stat-k { font-size: 10.5px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
+    .stat-v {
+      font-family: var(--font-mono); font-size: 18px; font-weight: 700; color: var(--ink);
+      font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .stat-model .stat-v { font-size: 13.5px; line-height: 24px; }
+
+    .card {
+      border-radius: 16px; box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 8px 24px rgba(16, 24, 40, 0.04);
+    }
+    .card h2 { font-size: 17px; letter-spacing: -0.01em; }
+    .btn-primary {
+      background: linear-gradient(180deg, #cf5a1a, var(--navy)); box-shadow: 0 4px 12px rgba(143, 53, 11, 0.28);
+    }
+    .btn-primary:hover { background: linear-gradient(180deg, #d9631f, #9a3a0d); transform: translateY(-1px); }
+    .btn-toggle:hover:not(.active) { border-color: var(--blue-ring); background: var(--blue-soft); }
+    .ticker-field:focus-within, .select-wrap:focus-within, .model-custom:focus {
+      border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-ring);
+    }
+
+    .model-block { margin-top: 16px; padding-top: 16px; border-top: 1px dashed var(--border); }
+    .field-label { display: block; font-size: 11px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-bottom: 7px; }
+    .select-wrap {
+      position: relative; border: 1px solid var(--border); border-radius: 9px; background: #fbfcfe;
+    }
+    .select-wrap::after {
+      content: ""; position: absolute; right: 14px; top: 50%; width: 7px; height: 7px;
+      border-right: 2px solid var(--faint); border-bottom: 2px solid var(--faint);
+      transform: translateY(-70%) rotate(45deg); pointer-events: none;
+    }
+    .select-wrap select {
+      appearance: none; -webkit-appearance: none; width: 100%; border: none; background: transparent;
+      padding: 11px 36px 11px 12px; font-size: 14px; font-weight: 600; color: var(--ink);
+      font-family: var(--font-ui); cursor: pointer;
+    }
+    .select-wrap select:focus { outline: none; }
+    .select-wrap select:disabled { opacity: 0.6; cursor: default; }
+    .model-custom {
+      width: 100%; margin-top: 8px; border: 1px solid var(--border); border-radius: 9px; background: #fbfcfe;
+      padding: 10px 12px; font-size: 13.5px; font-family: var(--font-mono); color: var(--ink);
+    }
+    .model-custom:focus { outline: none; }
+    .model-price { margin: 8px 0 0; font-size: 12.5px; color: var(--muted); line-height: 1.4; }
+
+    .fc-node { border-radius: 8px; box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05); }
+    .map-card .hint { max-width: 760px; }
 """
 
 # Absolute-positioned nodes + an SVG line layer, laid out to match the
@@ -634,13 +781,16 @@ APP_STYLE = """
 # drawn that way - the diagram matches the real asyncio.gather() calls.
 FLOWCHART_HTML = """
 <div class="fc-scroll"><div class="fc-wrap">
-  <svg class="fc-svg" viewBox="0 0 680 700">
+  <svg class="fc-svg" viewBox="0 0 680 716">
     <defs>
       <marker id="fc-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
         <path d="M0,0 L10,5 L0,10 z" style="fill:var(--rule)"></path>
       </marker>
       <marker id="fc-arrow-pos" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
         <path d="M0,0 L10,5 L0,10 z" style="fill:var(--pos)"></path>
+      </marker>
+      <marker id="fc-arrow-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" style="fill:var(--blue)"></path>
       </marker>
       <marker id="fc-arrow-neg" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
         <path d="M0,0 L10,5 L0,10 z" style="fill:var(--neg-border)"></path>
@@ -675,14 +825,18 @@ FLOWCHART_HTML = """
 
       <path d="M340,496 L340,524"></path>
     </g>
-    <path d="M340,580 L340,605 M190,605 L490,605 M190,605 L190,620 M490,605 L490,620"
-          style="stroke:var(--pos);stroke-width:2;fill:none;" marker-end="url(#fc-arrow-pos)"></path>
-    <path d="M440,552 L480,552" style="stroke:var(--neg-border);stroke-width:2;fill:none;" marker-end="url(#fc-arrow-neg)"></path>
-    <path d="M240,540 L212,540" style="stroke:var(--neg-border);stroke-width:2;fill:none;" marker-end="url(#fc-arrow-neg)"></path>
-    <path d="M212,566 L238,566" style="stroke:var(--rule);stroke-width:2;fill:none;" marker-end="url(#fc-arrow)"></path>
-    <text x="20" y="600" style="font:700 9.5px var(--font-ui);fill:var(--muted);">repaired draft goes back through the gate</text>
-    <text x="304" y="598" style="font:700 9.5px var(--font-ui);fill:var(--pos);">clears QA</text>
-    <text x="480" y="515" style="font:700 9.5px var(--font-ui);fill:var(--neg-ink);">critical findings</text>
+    <path d="M340,580 L340,612 L190,612 L190,634" style="stroke:var(--pos);stroke-width:2;fill:none;" marker-end="url(#fc-arrow-pos)"></path>
+    <path d="M340,612 L490,612 L490,634" style="stroke:var(--pos);stroke-width:2;fill:none;" marker-end="url(#fc-arrow-pos)"></path>
+    <rect x="294" y="584" width="92" height="18" rx="9" style="fill:var(--card-bg);stroke:var(--pos);stroke-width:1.5;"></rect>
+    <text x="340" y="596.5" text-anchor="middle" style="font:700 10px var(--font-ui);fill:var(--pos);">clears QA</text>
+
+    <path d="M240,538 L194,538" style="stroke:var(--neg-border);stroke-width:2;fill:none;" marker-end="url(#fc-arrow-neg)"></path>
+    <text x="217" y="531" text-anchor="middle" style="font:700 9.5px var(--font-ui);fill:var(--neg-ink);">critical</text>
+    <path d="M194,566 L238,566" style="stroke:var(--blue);stroke-width:2;fill:none;" marker-end="url(#fc-arrow-blue)"></path>
+    <text x="217" y="581" text-anchor="middle" style="font:700 9.5px var(--font-ui);fill:var(--blue);">re-check</text>
+
+    <path d="M440,552 L490,552" style="stroke:var(--neg-border);stroke-width:2;fill:none;stroke-dasharray:5 3;" marker-end="url(#fc-arrow-neg)"></path>
+    <text x="465" y="545" text-anchor="middle" style="font:700 9.5px var(--font-ui);fill:var(--neg-ink);">unfixed</text>
   </svg>
 
   <div class="fc-node" data-key="planning" data-node="planning" style="left:240px;top:16px;width:200px;height:56px;">
@@ -724,17 +878,17 @@ FLOWCHART_HTML = """
   <div class="fc-node fc-gate" data-key="qa" data-node="qa_gate" style="left:240px;top:524px;width:200px;height:56px;">
     <div class="fc-name">QA gate</div><div class="fc-blurb">Rules + LLM entailment + triage</div>
   </div>
-  <div class="fc-node" data-key="qa" data-notime="1" data-node="qa_repair" style="left:20px;top:524px;width:190px;height:56px;">
+  <div class="fc-node" data-key="qa" data-notime="1" data-node="qa_repair" style="left:8px;top:524px;width:186px;height:56px;">
     <div class="fc-name">QA repair loop</div><div class="fc-blurb">Trim or omit critical statements, then re-check</div>
   </div>
-  <div class="fc-node fc-blocked" data-key="__blocked" style="left:480px;top:524px;width:170px;height:56px;">
+  <div class="fc-node fc-blocked" data-key="__blocked" style="left:492px;top:524px;width:170px;height:56px;">
     <div class="fc-name">Blocked</div><div class="fc-blurb">No PDF - fixes required</div>
   </div>
 
-  <div class="fc-node" data-key="pdf" data-node="pdf" style="left:50px;top:620px;width:280px;height:60px;">
+  <div class="fc-node" data-key="pdf" data-node="pdf" style="left:50px;top:636px;width:280px;height:60px;">
     <div class="fc-name">Render PDF</div><div class="fc-blurb">Full report, merged with the technical appendix</div>
   </div>
-  <div class="fc-node" data-key="compact_pdf" data-node="compact_pdf" style="left:350px;top:620px;width:280px;height:60px;">
+  <div class="fc-node" data-key="compact_pdf" data-node="compact_pdf" style="left:350px;top:636px;width:280px;height:60px;">
     <div class="fc-name">Compact PDF</div><div class="fc-blurb">Brief, technical page, references</div>
   </div>
 </div></div>
@@ -751,15 +905,22 @@ APP_HTML = """
 </head>
 <body>
   <div class="shell">
-    <div class="topbar">
-      <div></div>
+    <header class="brandbar">
+      <div class="brand">
+        <img class="brand-logo" src="/assets/logo.png" alt="Megaannum">
+        <div>
+          <div class="brand-co">Megaannum Technology Limited</div>
+          <div class="brand-title">Equity Research Studio</div>
+        </div>
+      </div>
       <div class="tagline-top">Faster insights. Deeper decisions.</div>
-    </div>
+    </header>
 
-    <div class="telemetry">
-      <div class="t-item"><span class="t-k">Elapsed</span><span class="t-v" id="t-elapsed">&mdash;</span></div>
-      <div class="t-item"><span class="t-k">LLM cost</span><span class="t-v" id="t-cost">$0.00</span></div>
-      <div class="t-item"><span class="t-k">Tokens</span><span class="t-v" id="t-tokens">&mdash;</span></div>
+    <div class="stats">
+      <div class="stat"><span class="stat-k">Elapsed</span><span class="stat-v" id="t-elapsed">&mdash;</span></div>
+      <div class="stat"><span class="stat-k">LLM cost</span><span class="stat-v" id="t-cost">$0.00</span></div>
+      <div class="stat"><span class="stat-k">Tokens</span><span class="stat-v" id="t-tokens">&mdash;</span></div>
+      <div class="stat stat-model"><span class="stat-k">Model</span><span class="stat-v" id="t-model">&mdash;</span></div>
     </div>
 
     <div class="layout">
@@ -778,6 +939,14 @@ APP_HTML = """
             </button>
           </div>
           <p class="example-hint">e.g. AAPL, MSFT, NVDA, TSLA</p>
+          <div class="model-block">
+            <label class="field-label" for="model-select">Model</label>
+            <div class="select-wrap">
+              <select id="model-select" onchange="onModelChange()"><option>Loading models&hellip;</option></select>
+            </div>
+            <input id="model-custom" class="model-custom" placeholder="provider/model-id, e.g. openai/gpt-5.6-sol" autocomplete="off" style="display:none;">
+            <p class="model-price" id="model-price">Used for every LLM stage of the run.</p>
+          </div>
           <p class="resume-toggle"><a href="#" onclick="toggleResumeRow(event)" id="resume-link">Resume a previous run instead</a></p>
           <div class="ticker-row resume-row" id="resume-row" style="display:none;">
             <div class="ticker-field">
@@ -835,6 +1004,41 @@ APP_HTML = """
     let viewerMode = "full";
     let pollTimer = null;
     let tickTimer = null;
+    let MODELS = [];
+
+    function fmtPrice(m) {
+      return m.price ? `$${m.price[0]} in / $${m.price[1]} out per 1M tokens` : "price unavailable";
+    }
+
+    async function loadModels() {
+      const sel = document.getElementById("model-select");
+      try {
+        MODELS = (await (await fetch("/api/models")).json()).models || [];
+      } catch (err) { MODELS = []; }
+      sel.innerHTML = MODELS.map(m =>
+        `<option value="${m.id}">${m.id}${m.default ? "  (default)" : ""}</option>`).join("")
+        + `<option value="__custom__">Custom model id&hellip;</option>`;
+      const current = window.__lastJob && window.__lastJob.model;
+      if (current && MODELS.some(m => m.id === current)) sel.value = current;
+      onModelChange();
+    }
+
+    function selectedModel() {
+      const sel = document.getElementById("model-select");
+      return sel.value === "__custom__"
+        ? document.getElementById("model-custom").value.trim() : sel.value;
+    }
+
+    function onModelChange() {
+      const sel = document.getElementById("model-select");
+      const custom = document.getElementById("model-custom");
+      const price = document.getElementById("model-price");
+      custom.style.display = sel.value === "__custom__" ? "block" : "none";
+      const m = MODELS.find(x => x.id === sel.value);
+      price.textContent = m
+        ? `${m.name} - ${fmtPrice(m)}. Used for every LLM stage of the run.`
+        : "Enter an exact OpenRouter model id. Used for every LLM stage of the run.";
+    }
 
     // Every timestamp driving the UI's clocks comes from the server
     // (job.started_at, job.stage_first_started_at, job.stage_completed_at -
@@ -1007,6 +1211,8 @@ APP_HTML = """
         elapsedEl.textContent = "—";
       }
       costEl.textContent = job && job.cost_usd != null ? "$" + job.cost_usd.toFixed(2) : "$0.00";
+      const modelEl = document.getElementById("t-model");
+      if (modelEl) modelEl.textContent = (job && job.model) || selectedModel() || "\u2014";
       const total = job ? (job.input_tokens || 0) + (job.output_tokens || 0) : 0;
       tokensEl.textContent = total ? total.toLocaleString() : "—";
     }
@@ -1068,7 +1274,7 @@ APP_HTML = """
       try {
         const res = await fetch("/api/generate", {
           method: "POST", headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({resume_from: runId}),
+          body: JSON.stringify({resume_from: runId, model: selectedModel()}),
         });
         const body = await res.json();
         if (!res.ok) {
@@ -1096,7 +1302,7 @@ APP_HTML = """
       try {
         const res = await fetch("/api/generate", {
           method: "POST", headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({ticker}),
+          body: JSON.stringify({ticker, model: selectedModel()}),
         });
         const body = await res.json();
         if (!res.ok) {
@@ -1125,6 +1331,9 @@ APP_HTML = """
       renderViewer(job);
       updateTelemetry(job);
       const btn = document.getElementById("generate-btn");
+      const modelSel = document.getElementById("model-select");
+      if (job.model && MODELS.some(m => m.id === job.model)) { modelSel.value = job.model; onModelChange(); }
+      modelSel.disabled = job.status !== "done" && job.status !== "failed";
       if (job.ticker && !job.resume_from) document.getElementById("ticker").value = job.ticker;
       if (job.resume_from) document.getElementById("resume-run-id").value = job.resume_from;
 
@@ -1139,6 +1348,7 @@ APP_HTML = """
     }
 
     renderSteps(null);
+    loadModels();
     tickTimer = setInterval(tickTimes, 1000);
     if (jobId) { renderViewer({status: "running"}); poll(); }
   </script>
