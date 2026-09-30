@@ -162,12 +162,15 @@ written. Concretely:
   elaboration, or write only the supported fact and stop - a shorter, fully-supported finding
   is correct; a longer one with an unsupported clause is not.
 
-Return 3-6 substantive findings when the evidence supports them - fewer, if that is all the
-evidence carries. Each finding should be one compact analytical paragraph of 2-3 sentences
-(roughly 45-100 words), with one main idea and a clear logical bridge between fact and
-implication. A short factual sentence is acceptable only when the evidence cannot support
-any interpretation beyond the fact. Returning three strong findings is better than padding
-to six.
+Return 5-8 findings whenever the evidence carries that many, and never fewer than the
+evidence supports. Cover every distinct supported fact in the rows you were given - each
+reported metric, each comparison against consensus or a prior period, each dated event,
+each named view - as its own finding rather than fusing several into one. Each finding is
+one main idea in 1-2 sentences (roughly 25-60 words): the supported fact, then at most one
+bridge to why it matters, and only when the cited rows themselves support that bridge.
+Several short, fully-supported findings are better than one long finding with an unsupported
+clause: a sentence QA cannot fully verify is deleted, and its content is lost. Cite, for each
+finding, only the specific rows that state its facts.
 
 Every finding you return must cite the evidence_id and/or analytics_id rows it rests on,
 copied verbatim from the ids supplied to you. A finding with no matching id will be

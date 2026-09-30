@@ -51,6 +51,7 @@ logger = get_logger("synthesis.llm_synthesizer")
 
 _CLAIM_TYPES = {c.value for c in ClaimType}
 _MAX_TAKEAWAYS = 10
+_MIN_KEPT = 5
 
 _SYSTEM_PROMPT = """You are the synthesis layer of a neutral institutional company
 research pipeline. You are given every key finding the segment agents produced, each
@@ -196,13 +197,13 @@ class LLMSynthesizer(Synthesizer):
         if not rows:
             return
         system = """You are the final document-level editor for a neutral institutional
-company report. Treat the report as one coherent document, not a collection of independent
-sections. Review the full body for repeated facts, metrics, conclusions and explanations.
-Keep a repeated fact only when the occurrence adds a genuinely new comparison, implication,
-calculation, uncertainty or monitoring purpose. Otherwise keep its clearest and most
-contextually appropriate occurrence, and mark later repetitions as drop or shorten them to
-a necessary cross-reference without restating the same values. Key Takeaways are edited in
-a separate pass and may intentionally summarize facts that appear once in the body.
+company report. Each section is read on its own, so a section must keep enough substance to
+stand alone. Mark a finding as drop only when it states exactly the same fact, with the same
+figure and the same purpose, as another supplied body finding - a related figure, a shared
+source, the same topic or a different angle on one metric is NOT a repeat and must be kept.
+When two findings overlap only partly, keep both, or shorten the later one to its new part.
+Prefer keep over drop whenever in doubt. Key Takeaways are edited in a separate pass and may
+intentionally summarize facts that appear once in the body.
 
 Preserve all material information, neutrality, citations, factual qualifiers, periods and
 uncertainties. Do not introduce facts, investment recommendations, causal claims or evidence
@@ -273,6 +274,17 @@ sentence. Return JSON only."""
                 for index in range(len(result.key_findings))
             ]
             preserve_one(keys)
+
+        # A section must not be hollowed out by the editor: keep at least
+        # _MIN_KEPT findings per segment (strongest first) when the agent wrote them.
+        for result in segment_results:
+            keys = sorted(
+                (k for k in ((result.segment.value, i) for i in range(len(result.key_findings)))
+                 if k in self._llm_dropped),
+                key=lambda k: (source[k].materiality, k[1]))
+            kept = len(result.key_findings) - len(keys)
+            for key in keys[:max(0, _MIN_KEPT - kept)]:
+                self._llm_dropped.discard(key)
 
         risk_result = next(
             (r for r in segment_results if r.segment.value == "risks_catalysts"), None)
