@@ -62,6 +62,7 @@ from ..domain.report import (
 )
 from ..errors import RenderingError
 from ..logging_setup import get_logger, log_event
+from .refs import format_refs
 
 logger = get_logger("rendering.pdf")
 
@@ -265,6 +266,12 @@ def _styles() -> dict[str, ParagraphStyle]:
             fontSize=7.6, leading=10, textColor=ANNOTATION_INK,
             leftIndent=13, spaceAfter=6),
     }
+
+
+
+def _ref_link(number: int) -> str:
+    """One reference marker, linked to its anchor in the source list."""
+    return f'<a href="#cite_{number}" color="{ACCENT_HEX}">[{number}]</a>'
 
 
 class PdfReportRenderer:
@@ -667,10 +674,7 @@ class PdfReportRenderer:
         story += self._section_heading(index, section.title, styles)
 
         if section.summary:
-            refs = "".join(
-                f'<a href="#cite_{ref}" color="{ACCENT_HEX}">[{ref}]</a>'
-                for ref in section.summary_citation_refs
-            )
+            refs = format_refs(section.summary_citation_refs, _ref_link)
             story.append(Paragraph(f"{_escape(section.summary)} {refs}", styles["summary"]))
 
         for paragraph in section.paragraphs:
@@ -833,10 +837,7 @@ class PdfReportRenderer:
     def _statement_html(self, statement) -> str:
         # Each ref is an internal link to its anchor in the source list
         # (_back_matter), so clicking [n] in the body jumps straight to it.
-        refs = "".join(
-            f'<a href="#cite_{r}" color="{ACCENT_HEX}">[{r}]</a>'
-            for r in statement.citation_refs
-        )
+        refs = format_refs(statement.citation_refs, _ref_link)
         tag = _CLAIM_TAGS.get(statement.claim_type, statement.claim_type.value)
         return (
             f"{_escape(statement.text)} "

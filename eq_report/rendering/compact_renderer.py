@@ -23,6 +23,7 @@ from ..domain.report import MetricTable, ReportDraft
 from ..logging_setup import get_logger
 from ..synthesis.terminology import claim_fingerprint
 from .brand import BAND_H, brand_band, footer
+from .refs import format_refs, refs_in
 from .json_loader import load_report_json
 from .pdf_renderer import ACCENT, ACCENT_LINE, ACCENT_SOFT, HAIRLINE, INK, MUTED, ZEBRA
 from .technical_appendix import build_technical_appendix_pdf, merge_technical_appendix
@@ -77,7 +78,7 @@ def _overlaps(left: frozenset[str], right: frozenset[str]) -> bool:
 
 def _cited_text(text: str, refs: tuple[int, ...]) -> str:
     """Append the full report's stable source references to compact prose."""
-    return text + (" " + "".join(f"[{ref}]" for ref in sorted(set(refs))) if refs else "")
+    return text + (" " + format_refs(refs) if refs else "")
 
 
 def _bullets(c: Canvas, x: float, y: float, width: float, texts: list[str]) -> float:
@@ -451,7 +452,7 @@ def _render_brief(draft: ReportDraft, output_pdf: Path, *, total_pages: int,
 
     footer(c, page_w, f"Page 1 of {total_pages} | Compact version of the full structured report")
     c.save()
-    refs = sorted({int(n) for text in shown + fitted for n in re.findall(r"\[(\d+)\]", text)})
+    refs = sorted({n for text in shown + fitted for n in refs_in(text)})
     return refs, fits
 
 

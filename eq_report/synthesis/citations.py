@@ -21,6 +21,7 @@ class CitationRegistry:
     def __init__(self, reader: EvidenceReader) -> None:
         self._reader = reader
         self._numbers: dict[str, int] = {}
+        self._by_source: dict[str, int] = {}
         self._citations: list[Citation] = []
         self._missing: list[str] = []
 
@@ -40,8 +41,18 @@ class CitationRegistry:
                 if evidence_id not in self._missing:
                     self._missing.append(evidence_id)
                 continue
+            # Rows from the same published document share one reference number. Feed
+            # rows (no publisher page, only a retrieval URL) stay separate: their
+            # citation text carries the metric, which is what tells them apart.
+            document = item.original_source_url or item.source_url
+            if document and document in self._by_source:
+                self._numbers[evidence_id] = self._by_source[document]
+                refs.append(self._by_source[document])
+                continue
             number = len(self._citations) + 1
             self._numbers[evidence_id] = number
+            if document:
+                self._by_source[document] = number
             self._citations.append(self._citation(number, item))
             refs.append(number)
         return tuple(sorted(set(refs)))
