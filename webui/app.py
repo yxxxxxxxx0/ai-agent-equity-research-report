@@ -1130,7 +1130,7 @@ APP_STYLE = """
     .stat-v { font-size: 14px; }
     .stat-model .stat-v { font-size: 12.5px; line-height: 1.3; }
     .dash { flex: 1; min-height: 0; display: grid; gap: 12px; align-items: stretch;
-      grid-template-columns: minmax(250px, 17%) minmax(0, 1fr) minmax(400px, 31%); }
+      grid-template-columns: minmax(250px, 16%) min(var(--paper-w, 46%), 58vw) minmax(0, 1fr); }
     .col { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
     .col .card { margin: 0; padding: 14px 16px; min-height: 0; }
     .col-a .card:last-child { flex: 1; overflow-y: auto; }
@@ -1141,7 +1141,7 @@ APP_STYLE = """
     .qa-card { flex: 1 1 0; display: flex; flex-direction: column; overflow: hidden; }
     .qa-card .hint, .map-card .hint { display: none; }
     .qa-card #qa-body { overflow-y: auto; flex: 1; min-height: 0; }
-    .map-card { flex: 1.25 1 0; overflow: hidden; display: flex; flex-direction: column; }
+    .map-card { flex: 2 1 0; overflow: hidden; display: flex; flex-direction: column; }
     .map-card .fc-scroll { flex: 1; min-height: 0; overflow: hidden; display: flex; justify-content: center; align-items: flex-start; }
     .map-card .fc-wrap { flex: none; margin: 0; }
     .col-a .ticker-row { flex-direction: column; }
@@ -1154,6 +1154,7 @@ APP_STYLE = """
       body { overflow: auto; }
       .shell { height: auto; }
       .dash { grid-template-columns: 1fr; }
+      .viewer-card { aspect-ratio: auto; }
       .viewer-card { min-height: 520px; }
       .map-card { min-height: 560px; }
     }
@@ -1623,16 +1624,22 @@ APP_HTML = """
       try { await fetch(`/api/stop/${jobId}`, {method: "POST"}); } catch (err) { btn.disabled = false; }
     }
 
+    // The report viewer is a portrait A4 page (210:297) as tall as the dashboard.
+    function fitPaper() {
+      const dash = document.querySelector(".dash");
+      if (dash) dash.style.setProperty("--paper-w", (dash.clientHeight * 210 / 297) + "px");
+    }
+
     // Scale the workflow map (designed at 680x716) to whatever room its column has.
     function fitMap() {
       const box = document.querySelector(".map-card .fc-scroll");
       const wrap = document.querySelector(".map-card .fc-wrap");
       if (!box || !wrap) return;
       wrap.style.zoom = 1;
-      const s = Math.min(box.clientWidth / 680, box.clientHeight / 716, 0.95);
+      const s = Math.min(box.clientWidth / 680, box.clientHeight / 716, 1.3);
       wrap.style.zoom = Math.max(0.3, s);
     }
-    window.addEventListener("resize", fitMap);
+    window.addEventListener("resize", () => { fitPaper(); fitMap(); });
 
     // ---- download buttons -------------------------------------------------------
     function updateDownloads(job) {
@@ -1964,6 +1971,7 @@ APP_HTML = """
 
     renderSteps(null);
     renderQA(null);
+    fitPaper();
     fitMap();
     tickTimer = setInterval(tickTimes, 1000);
     if (jobId) { renderViewer({status: "running"}); poll(); }
