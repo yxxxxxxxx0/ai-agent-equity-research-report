@@ -1130,18 +1130,18 @@ APP_STYLE = """
     .stat-v { font-size: 14px; }
     .stat-model .stat-v { font-size: 12.5px; line-height: 1.3; }
     .dash { flex: 1; min-height: 0; display: grid; gap: 12px; align-items: stretch;
-      grid-template-columns: minmax(270px, 19%) minmax(0, 1fr) minmax(420px, 36%); }
+      grid-template-columns: minmax(250px, 17%) minmax(0, 1fr) minmax(400px, 31%); }
     .col { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
     .col .card { margin: 0; padding: 14px 16px; min-height: 0; }
     .col-a .card:last-child { flex: 1; overflow-y: auto; }
-    .viewer-card { flex: 1.25 1 0; min-height: 0; }
+    .viewer-card { flex: 1 1 0; min-height: 0; }
     .viewer-card .viewer-pane { min-height: 0; flex: 1; }
     .viewer-pane.report { max-height: none; padding: 18px 22px 24px; }
     .viewer-head { margin-bottom: 10px; }
     .qa-card { flex: 1 1 0; display: flex; flex-direction: column; overflow: hidden; }
     .qa-card .hint, .map-card .hint { display: none; }
     .qa-card #qa-body { overflow-y: auto; flex: 1; min-height: 0; }
-    .map-card { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+    .map-card { flex: 1.25 1 0; overflow: hidden; display: flex; flex-direction: column; }
     .map-card .fc-scroll { flex: 1; min-height: 0; overflow: hidden; display: flex; justify-content: center; align-items: flex-start; }
     .map-card .fc-wrap { flex: none; margin: 0; }
     .col-a .ticker-row { flex-direction: column; }
@@ -1168,6 +1168,47 @@ APP_STYLE = """
     .run-badge.ok { background: var(--pos-bg); color: var(--pos); border-color: #1d5a49; }
     .run-badge.bad { background: var(--neg-bg); color: var(--neg-ink); border-color: #5b2a33; }
     .run-badge.idle { background: #222a40; color: var(--ink-soft); border-color: var(--border); }
+    /* ---- compact type (run page only; the home page keeps its larger sizes) ---- */
+    .topline .brand-title { font-size: 19px; }
+    .topline .stat { padding: 5px 10px; }
+    .topline .stat-k { font-size: 9.5px; }
+    .topline .stat-v { font-size: 12.5px; }
+    .topline .stat-model .stat-v { font-size: 11.5px; }
+    .dash .card { padding: 12px 14px; }
+    .dash .card h2 { font-size: 14px; }
+    .dash .btn { font-size: 12.5px; }
+    .dash .btn-toggle { padding: 7px 11px; }
+    .dash .step-title { font-size: 13px; }
+    .dash .step-desc { font-size: 11px; }
+    .dash .step-time { font-size: 11px; }
+    .dash .step { padding-bottom: 16px; }
+    .dash .run-ticker { font-size: 28px; }
+    .dash .run-model, .dash .run-detail, .dash .run-badge { font-size: 11px; }
+    .dash .rp-co { font-size: 22px; }
+    .dash .rp-sub { font-size: 12px; }
+    .dash .rp-meta { font-size: 11.5px; }
+    .dash .rp-hint { font-size: 11.5px; }
+    .dash .rp-h { font-size: 16px; }
+    .dash .rp-n { width: 22px; height: 22px; font-size: 12px; }
+    .dash .rp-summary, .dash .rp-stmt { font-size: 13px; line-height: 1.55; }
+    .dash .rp-tag { font-size: 9.5px; }
+    .dash .rp-ref { font-size: 11px; }
+    .dash .rp-table, .dash .rp-tt { font-size: 12px; }
+    .dash .rp-note, .dash .rp-cites { font-size: 11px; }
+    .dash .viewer-pane.report { padding: 14px 18px 20px; }
+    .dash .badge { font-size: 11px; padding: 3px 9px; }
+    .dash .qa-group > summary { font-size: 12.5px; padding: 9px 13px; }
+    .dash .qa-item { font-size: 12px; padding: 9px 13px; }
+    .dash .qa-check, .dash .qa-sec { font-size: 10.5px; }
+    .dash .qa-subject { font-size: 11.5px; }
+    .dash .qa-empty { font-size: 12px; }
+    .src-heading { font-size: 15px; }
+    .src-quote { font-size: 13px; }
+    .src-title { font-size: 13px; }
+    .src-data { font-size: 12px; }
+    .src-excerpt, .src-plain { font-size: 11.5px; }
+    .src-row, .src-h, .src-tag { font-size: 10.5px; }
+    .src-link { font-size: 11.5px; }
     .error-note, .qa-note { background: #2c1a1f; border-color: #5b2a33; color: #fca5a5; }
 """
 
@@ -1359,6 +1400,13 @@ APP_HTML = """
         </div>
       </div>
 
+      </div>
+      <div class="col col-c">
+    <div class="card map-card">
+      <h2>Workflow map</h2>
+      <p class="hint">The pipeline's real shape - parallel acquisition sources, parallel analysis, the QA pass/fail gate. Nodes glow live as your report moves through it.</p>
+      """ + FLOWCHART_HTML + """
+    </div>
     <div class="card qa-card">
       <div class="qa-head">
         <h2>4. QA review</h2>
@@ -1366,14 +1414,6 @@ APP_HTML = """
       </div>
       <p class="hint">What the quality checks raised against the evidence while this report was generated, what the repair loop changed in response, and any pipeline notices.</p>
       <div id="qa-body"><div class="qa-empty">Findings, repairs and notices appear here once QA has run.</div></div>
-    </div>
-
-      </div>
-      <div class="col col-c">
-    <div class="card map-card">
-      <h2>Workflow map</h2>
-      <p class="hint">The pipeline's real shape - parallel acquisition sources, parallel analysis, the QA pass/fail gate. Nodes glow live as your report moves through it.</p>
-      """ + FLOWCHART_HTML + """
     </div>
       </div>
     </div>
@@ -1589,7 +1629,7 @@ APP_HTML = """
       const wrap = document.querySelector(".map-card .fc-wrap");
       if (!box || !wrap) return;
       wrap.style.zoom = 1;
-      const s = Math.min(box.clientWidth / 680, box.clientHeight / 716, 1.6);
+      const s = Math.min(box.clientWidth / 680, box.clientHeight / 716, 0.95);
       wrap.style.zoom = Math.max(0.3, s);
     }
     window.addEventListener("resize", fitMap);

@@ -48,7 +48,7 @@ clears the lists; the finished files stay on disk (see section 6).
 
 There are two pages. The **home page** (`/`) is where you start a report. Pressing Generate takes you to
 the **run page** (`/job/<id>`), which fits on one screen: 1 (the run) and 2 (the steps) on the left, 3 (the
-report viewer) and 4 (QA review) in the middle, and the workflow map on the right. The home page also lists
+report viewer) in the middle at full height, and the workflow map with 4 (QA review) below it on the right. The home page also lists
 this session's recent runs, so you can get back to a run page; an old link after a server restart just
 returns you to the home page.
 
