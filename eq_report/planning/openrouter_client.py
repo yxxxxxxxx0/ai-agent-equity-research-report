@@ -16,7 +16,7 @@ from typing import Any
 
 from ..config import ModelConfig
 from ..errors import ConfigurationError
-from ..llm.client import _post_with_hard_deadline
+from ..llm.client import _parse_json_object, _post_with_hard_deadline
 from ..llm.usage import UsageEvent, UsageTracker
 
 logger = logging.getLogger("eq_report.planning.openrouter_client")
@@ -45,8 +45,16 @@ class OpenRouterPlannerClient:
     async def create_plan(
         self, system_prompt: str, user_prompt: str
     ) -> PlannerModelResponse:
-        return await asyncio.to_thread(
-            self._create_plan_sync, system_prompt, user_prompt)
+        # A model occasionally answers with an empty or malformed reply; one
+        # retry clears that without failing the whole run.
+        for attempt in (1, 2):
+            try:
+                return await asyncio.to_thread(
+                    self._create_plan_sync, system_prompt, user_prompt)
+            except ValueError as exc:
+                if attempt == 2:
+                    raise
+                logger.warning("planner reply was not valid JSON, retrying once: %s", exc)
 
     def _create_plan_sync(
         self, system_prompt: str, user_prompt: str
@@ -107,6 +115,7 @@ class OpenRouterPlannerClient:
         )
         response.raise_for_status()
         body = response.json()
+        text = ""
         try:
             content = body["choices"][0]["message"]["content"]
             if isinstance(content, list):
@@ -116,9 +125,12 @@ class OpenRouterPlannerClient:
                 )
             else:
                 text = str(content)
-            payload = json.loads(text.strip())
+            payload = _parse_json_object(text)
         except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-            raise ValueError("OpenRouter planner did not return valid JSON") from exc
+            finish = ((body.get("choices") or [{}])[0] or {}).get("finish_reason")
+            raise ValueError(
+                f"OpenRouter planner did not return valid JSON (model={self.config.model}, "
+                f"finish_reason={finish}, reply starts: {text[:120]!r})") from exc
         if not isinstance(payload, dict):
             raise TypeError("OpenRouter planner JSON must be an object")
 
