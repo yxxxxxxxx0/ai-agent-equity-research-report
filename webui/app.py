@@ -109,6 +109,31 @@ def _live_models() -> dict[str, dict] | None:
     return _MODEL_CACHE["live"]
 
 
+_CREDITS: dict = {"at": 0.0, "value": None}
+
+
+def _credits() -> dict | None:
+    """Remaining OpenRouter credits (total purchased minus used), cached for 30 s.
+
+    The key stays on the server; the page only ever sees the three numbers.
+    """
+    if time.time() - _CREDITS["at"] < 30 and _CREDITS["value"] is not None:
+        return _CREDITS["value"]
+    key = Settings.from_env().model.api_key
+    if not key:
+        return None
+    request_ = urllib.request.Request(
+        "https://openrouter.ai/api/v1/credits", headers={"Authorization": f"Bearer {key}"})
+    try:
+        with urllib.request.urlopen(request_, timeout=8) as response:
+            data = json.load(response)["data"]
+    except Exception:  # noqa: BLE001 - show the last known value, or nothing
+        return _CREDITS["value"]
+    total, used = float(data["total_credits"]), float(data["total_usage"])
+    _CREDITS.update(at=time.time(), value={"total": total, "used": used, "remaining": round(total - used, 2)})
+    return _CREDITS["value"]
+
+
 def _model_options() -> list[dict]:
     live = _live_models()
     default = Settings.from_env().model.model
@@ -406,7 +431,7 @@ def _run_job(
             )
     except asyncio.CancelledError:
         with _JOBS_LOCK:
-            JOBS[job_id].update(status="stopped", error="Stopped by you.")
+            JOBS[job_id].update(status="stopped", error="Stopped by you.", completed_at=time.time())
     except Exception as exc:  # keep the failure visible in the UI, not just the console
         with _JOBS_LOCK:
             JOBS[job_id].update(
@@ -597,6 +622,11 @@ def api_stop(job_id: str):
         loop, task = run
         loop.call_soon_threadsafe(task.cancel)
     return jsonify({"ok": True})
+
+
+@app.route("/api/credits", methods=["GET"])
+def api_credits():
+    return jsonify(_credits() or {"error": "credits unavailable"})
 
 
 @app.route("/api/models", methods=["GET"])
@@ -1130,7 +1160,7 @@ APP_STYLE = """
     .stat-v { font-size: 14px; }
     .stat-model .stat-v { font-size: 12.5px; line-height: 1.3; }
     .dash { flex: 1; min-height: 0; display: grid; gap: 12px; align-items: stretch;
-      grid-template-columns: minmax(250px, 1fr) min(var(--paper-w, 46%), 58vw) minmax(380px, 640px); }
+      grid-template-columns: minmax(250px, 16%) minmax(0, 1fr) minmax(380px, 640px); }
     .col { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
     .col .card { margin: 0; padding: 14px 16px; min-height: 0; }
     .col-a .card:last-child { flex: 1; overflow-y: auto; }
@@ -1154,7 +1184,6 @@ APP_STYLE = """
       body { overflow: auto; }
       .shell { height: auto; }
       .dash { grid-template-columns: 1fr; }
-      .viewer-card { aspect-ratio: auto; }
       .viewer-card { min-height: 520px; }
       .map-card { min-height: 560px; }
     }
@@ -1357,6 +1386,7 @@ APP_HTML = """
       <div class="stat"><span class="stat-k">Elapsed</span><span class="stat-v" id="t-elapsed">&mdash;</span></div>
       <div class="stat"><span class="stat-k">LLM cost</span><span class="stat-v" id="t-cost">$0.00</span></div>
       <div class="stat"><span class="stat-k">Tokens</span><span class="stat-v" id="t-tokens">&mdash;</span></div>
+      <div class="stat"><span class="stat-k">Credits left</span><span class="stat-v" id="t-credits">&mdash;</span></div>
       <div class="stat stat-model"><span class="stat-k">Model</span><span class="stat-v" id="t-model">&mdash;</span></div>
     </div>
 
@@ -1441,6 +1471,12 @@ APP_HTML = """
     // stage starts). A tick just recomputes Date.now() - <server time>, so
     // refreshing the page mid-run shows the same true elapsed time instead
     // of restarting every clock at 0.
+    // "Now" for every clock: frozen at the end time once the run has finished.
+    function nowMs(job) {
+      if (job && isFinished(job)) return job.completed_at ? job.completed_at * 1000 : (window.__finishedAt || Date.now());
+      return Date.now();
+    }
+
     function stageElapsedMs(job, stage) {
       if (!job) return null;
       const recorded = job.stage_durations_ms && job.stage_durations_ms[stage];
@@ -1448,7 +1484,7 @@ APP_HTML = """
       const started = job.stage_first_started_at && job.stage_first_started_at[stage];
       if (started == null) return null;
       const completed = job.stage_completed_at && job.stage_completed_at[stage];
-      return Math.max(0, ((completed != null ? completed * 1000 : Date.now()) - started * 1000));
+      return Math.max(0, ((completed != null ? completed * 1000 : nowMs(job)) - started * 1000));
     }
 
     function groupElapsedMs(job, stages) {
@@ -1461,14 +1497,14 @@ APP_HTML = """
         job.stage_completed_at && job.stage_completed_at[stage] != null);
       const endMs = allComplete
         ? Math.max(...stages.map(stage => job.stage_completed_at[stage])) * 1000
-        : Date.now();
+        : nowMs(job);
       return Math.max(0, endMs - Math.min(...starts) * 1000);
     }
 
     function finalizingElapsedMs(job) {
       const started = job && job.stage_completed_at && job.stage_completed_at.compact_pdf;
       if (started == null) return null;
-      const ended = job.completed_at != null ? job.completed_at * 1000 : Date.now();
+      const ended = job.completed_at != null ? job.completed_at * 1000 : nowMs(job);
       return Math.max(0, ended - started * 1000);
     }
 
@@ -1600,7 +1636,7 @@ APP_HTML = """
       const tokensEl = document.getElementById("t-tokens");
       if (!elapsedEl) return;
       if (job && job.started_at) {
-        const endMs = job.duration_ms != null ? (job.started_at * 1000 + job.duration_ms) : Date.now();
+        const endMs = job.duration_ms != null ? (job.started_at * 1000 + job.duration_ms) : nowMs(job);
         elapsedEl.textContent = fmtSecs(endMs - job.started_at * 1000);
       } else {
         elapsedEl.textContent = "—";
@@ -1616,18 +1652,22 @@ APP_HTML = """
       return job && (job.status === "done" || job.status === "failed" || job.status === "stopped");
     }
 
+    async function loadCredits() {
+      try {
+        const c = await (await fetch("/api/credits")).json();
+        const el = document.getElementById("t-credits");
+        if (!el || c.remaining == null) return;
+        el.textContent = "$" + c.remaining.toFixed(2);
+        el.parentElement.title = "$" + c.used.toFixed(2) + " used of $" + c.total.toFixed(2);
+      } catch (err) { /* the chip is a convenience */ }
+    }
+
     async function stopRun() {
       if (!jobId) return;
       const btn = document.getElementById("stop-btn");
       btn.disabled = true;
       btn.innerHTML = "Stopping&hellip;";
       try { await fetch(`/api/stop/${jobId}`, {method: "POST"}); } catch (err) { btn.disabled = false; }
-    }
-
-    // The report viewer is a portrait A4 page (210:297) as tall as the dashboard.
-    function fitPaper() {
-      const dash = document.querySelector(".dash");
-      if (dash) dash.style.setProperty("--paper-w", (dash.clientHeight * 210 / 297) + "px");
     }
 
     // Scale the workflow map (designed at 680x716) to whatever room its column has.
@@ -1639,7 +1679,7 @@ APP_HTML = """
       const s = Math.min(box.clientWidth / 680, box.clientHeight / 716, 1.3);
       wrap.style.zoom = Math.max(0.3, s);
     }
-    window.addEventListener("resize", () => { fitPaper(); fitMap(); });
+    window.addEventListener("resize", fitMap);
 
     // ---- download buttons -------------------------------------------------------
     function updateDownloads(job) {
@@ -1955,6 +1995,7 @@ APP_HTML = """
       const res = await fetch(`/api/job/${jobId}`);
       const job = await res.json();
       window.__lastJob = job;
+      if (isFinished(job) && !window.__finishedAt) window.__finishedAt = Date.now();
       renderSteps(job);
       applyFlowchart(job);
       renderViewer(job);
@@ -1963,6 +2004,7 @@ APP_HTML = """
       updateRunCard(job);
       if (isFinished(job)) {
         renderCostByLayer(job);
+        loadCredits();
         clearTimeout(pollTimer);
         return;
       }
@@ -1971,8 +2013,9 @@ APP_HTML = """
 
     renderSteps(null);
     renderQA(null);
-    fitPaper();
     fitMap();
+    loadCredits();
+    setInterval(loadCredits, 60000);
     tickTimer = setInterval(tickTimes, 1000);
     if (jobId) { renderViewer({status: "running"}); poll(); }
   </script>
@@ -1995,6 +2038,7 @@ HOME_HTML = """
     .home-title { font-size: 46px; font-weight: 800; letter-spacing: -0.03em; color: #fff; text-align: center; line-height: 1.1; }
     .home-sub { color: var(--muted); font-size: 15px; margin-top: 8px; text-align: center; }
     .home-card { width: min(560px, 100%); margin: 0; }
+    .home-credits { text-align: center; margin-top: 10px; font-size: 12.5px; color: var(--muted); font-family: var(--font-mono); }
     .job-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; margin-top: 8px; border: 1px solid var(--border);
       border-radius: 10px; text-decoration: none; color: var(--ink); background: #10162a; }
     .job-row:hover { border-color: var(--blue); background: #1b2236; }
@@ -2007,6 +2051,7 @@ HOME_HTML = """
     <div>
       <div class="home-title">EQR Report</div>
       <div class="home-sub">Generate a full and compact equity research report.</div>
+      <div class="home-credits" id="home-credits"></div>
     </div>
 
     <div class="home-card">
@@ -2204,8 +2249,18 @@ HOME_HTML = """
       } catch (err) { /* the list is a convenience */ }
     }
 
+    async function loadCredits() {
+      try {
+        const c = await (await fetch("/api/credits")).json();
+        if (c.remaining == null) return;
+        document.getElementById("home-credits").textContent =
+          "OpenRouter credits left: $" + c.remaining.toFixed(2) + " of $" + c.total.toFixed(2);
+      } catch (err) { /* optional */ }
+    }
+
     loadModels();
     loadRecent();
+    loadCredits();
   </script>
 </body>
 </html>

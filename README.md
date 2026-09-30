@@ -48,8 +48,7 @@ clears the lists; the finished files stay on disk (see section 6).
 
 There are two pages. The **home page** (`/`) is where you start a report. Pressing Generate takes you to
 the **run page** (`/job/<id>`), which fits on one screen: 1 (the run) and 2 (the steps) on the left, 3 (the
-report viewer, a portrait page in A4 proportions) in the middle at full height, and the workflow map with
-4 (QA review) below it on the right. The home page also lists
+report viewer) in the middle at full height, and the workflow map with 4 (QA review) below it on the right. The home page also lists
 this session's recent runs, so you can get back to a run page; an old link after a server restart just
 returns you to the home page.
 
@@ -70,7 +69,8 @@ returns you to the home page.
 
 **Watch it run**
 
-- **Stat cards** at the top show elapsed time, LLM cost so far, tokens, and the model in use.
+- **Stat cards** at the top show elapsed time, LLM cost so far, tokens, your remaining OpenRouter credits, and
+  the model in use. The clocks stop when a run ends or is stopped. The home page shows the credits too.
 - **2. Generating Reports** is a five-step tracker with a timer on each step.
 - **Workflow map** (bottom of the page) shows the real pipeline. Nodes turn green when
   done and pulse orange while running; each shows its time and, for LLM stages, its cost.
