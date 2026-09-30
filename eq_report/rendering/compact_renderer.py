@@ -8,6 +8,7 @@ same calculations and chart captions as the full report.
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 from reportlab.lib import colors
@@ -21,6 +22,7 @@ from ..domain.enums import ReportSection
 from ..domain.report import MetricTable, ReportDraft
 from ..logging_setup import get_logger
 from ..synthesis.terminology import claim_fingerprint
+from .brand import BAND_H, brand_band, footer
 from .json_loader import load_report_json
 from .pdf_renderer import ACCENT, ACCENT_LINE, ACCENT_SOFT, HAIRLINE, INK, MUTED, ZEBRA
 from .technical_appendix import build_technical_appendix_pdf, merge_technical_appendix
@@ -36,13 +38,13 @@ PAPER = colors.white
 
 #: One body size and leading for every block on the page, so no box reads
 #: smaller than its neighbour; section bars and the masthead stay distinct.
-BODY_SIZE = 7.0
-BODY_LEADING = 8.8
+BODY_SIZE = 8.8
+BODY_LEADING = 12.0
 #: Card padding: first baseline sits 13pt under the card top (see panel()),
 #: so a card needs this much beyond its lines to keep descenders inside.
-_CARD_PAD = 10.0
+_CARD_PAD = 12.0
 _BULLET_INDENT = 8.0
-_ITEM_GAP = 2.0
+_ITEM_GAP = 3.5
 
 
 def _lines(text: str, width: float, font: str = "Helvetica", size: float = BODY_SIZE) -> list[str]:
@@ -96,7 +98,7 @@ def _bullets(c: Canvas, x: float, y: float, width: float, texts: list[str]) -> f
 #: Height of a filled section-title bar, and the light card background drawn
 #: beneath it - the two together give each section the boxed-grid look
 #: (solid title bar, framed content box) instead of a bare rule under text.
-_BAR_H = 14.0
+_BAR_H = 17.0
 
 
 def _heading(c: Canvas, x: float, y: float, label: str, *, width: float = 535.0) -> float:
@@ -106,8 +108,8 @@ def _heading(c: Canvas, x: float, y: float, label: str, *, width: float = 535.0)
     c.setFillColor(ACCENT)
     c.roundRect(x, y - _BAR_H + 3, width, _BAR_H, 3, fill=1, stroke=0)
     c.setFillColor(colors.white)
-    c.setFont("Helvetica-Bold", 8.2)
-    c.drawString(x + 6, y - 7, label.upper())
+    c.setFont("Helvetica-Bold", 9.5)
+    c.drawString(x + 7, y - 9, label.upper())
     return y - _BAR_H - 5
 
 
@@ -135,14 +137,14 @@ def _bullet_block_height(texts: list[str], width: float) -> float:
     return body + _CARD_PAD if body else 0.0
 
 
-_ROW_H = 11.0
+_ROW_H = 14.0
 
 
 def _table_block_height(table: MetricTable | None) -> float:
     """Exact height `_table` descends by, for sizing its card ahead of time."""
     if table is None or not table.columns:
         return 0.0
-    return 11 + _ROW_H + min(len(table.rows), 4) * _ROW_H + 4
+    return 13 + _ROW_H + min(len(table.rows), 4) * _ROW_H + 4
 
 
 def _paragraph_block_height(text: str, width: float) -> float:
@@ -199,7 +201,7 @@ def _table(c: Canvas, x: float, y: float, width: float, table: MetricTable) -> f
     c.setFillColor(ACCENT)
     c.setFont("Helvetica-Bold", BODY_SIZE)
     c.drawString(x, y, table.title)
-    y -= 11
+    y -= 13
     if len(columns) == 4:
         col_widths = (width * 0.40, width * 0.20, width * 0.20, width * 0.20)
     elif len(columns) == 3:
@@ -214,7 +216,7 @@ def _table(c: Canvas, x: float, y: float, width: float, table: MetricTable) -> f
     c.setFillColor(colors.white)
     c.setFont("Helvetica-Bold", BODY_SIZE)
     for index, column in enumerate(columns):
-        c.drawString(col_starts[index] + 2, y - 8,
+        c.drawString(col_starts[index] + 3, y - 10,
                      _fit_cell(column, col_widths[index] - 4, font="Helvetica-Bold", size=BODY_SIZE))
     y -= _ROW_H
     for row_index, row in enumerate(table.rows[:4]):
@@ -229,7 +231,7 @@ def _table(c: Canvas, x: float, y: float, width: float, table: MetricTable) -> f
         c.setFont(font, BODY_SIZE)
         values = (row.label, *row.cells)[:len(columns)]
         for index, value in enumerate(values):
-            c.drawString(col_starts[index] + 2, y - 8,
+            c.drawString(col_starts[index] + 3, y - 10,
                          _fit_cell(value, col_widths[index] - 4, font=font, size=BODY_SIZE))
         y -= _ROW_H
         if row_index < min(len(table.rows), 4) - 1:
@@ -240,11 +242,12 @@ def _table(c: Canvas, x: float, y: float, width: float, table: MetricTable) -> f
 
 
 #: Vertical gap left between one block and the next.
-_BLOCK_GAP = 10.0
+_BLOCK_GAP = 12.0
 
 
-def _render_brief(draft: ReportDraft, output_pdf: Path) -> None:
-    """Render page one as a dense brief in the full report's own house style.
+def _render_brief(draft: ReportDraft, output_pdf: Path, *, total_pages: int) -> list[int]:
+    """Render page one as a brief in the full report's own house style; returns the
+    source numbers it cites (for the references page).
 
     Laid out as a top-down flow of independent blocks rather than a fixed
     grid: a block with no supporting evidence is skipped entirely - no
@@ -276,25 +279,18 @@ def _render_brief(draft: ReportDraft, output_pdf: Path) -> None:
     monitoring = next((s for s in draft.sections if s.section == ReportSection.WHAT_MATTERS_NEXT), None)
     recent = next((s for s in draft.sections if s.title == "Recent Developments"), None)
 
-    # Header: the same accent-orange identity band as the full report's
-    # masthead (see pdf_renderer._masthead_band), condensed to one page.
-    c.setFillColor(ACCENT)
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(left_x, page_h - 28, "Compact Equity Brief")
-    c.setFont("Helvetica", 13.5)
+    brand_band(c, page_w, page_h, "Compact Equity Brief",
+               f"REPORT DATE: {draft.report_date.isoformat()}")
+    name = re.sub(rf"^{re.escape(draft.ticker or '')}\s*[\u2014\u2013-]\s*", "", draft.company)
     c.setFillColor(INK)
-    c.drawString(left_x, page_h - 48, f"{draft.company} ({draft.ticker})")
-    c.setFont("Helvetica", 8.2)
+    c.setFont("Helvetica-Bold", 15)
+    c.drawString(left_x, page_h - BAND_H - 24, f"{name} ({draft.ticker})")
     c.setFillColor(MUTED)
-    c.drawString(left_x, page_h - 62, "Compact equity brief")
-    c.setFillColor(ACCENT_SOFT)
-    c.roundRect(page_w - 178, page_h - 59, 160, 37, 4, fill=1, stroke=0)
-    c.setFillColor(ACCENT)
-    c.setFont("Helvetica-Bold", 8.5)
-    c.drawCentredString(page_w - 98, page_h - 37, f"REPORT DATE: {draft.report_date.isoformat()}")
+    c.setFont("Helvetica", 8.8)
+    c.drawString(left_x, page_h - BAND_H - 37, "Equity research  |  compact brief")
     c.setStrokeColor(ACCENT_LINE)
-    c.setLineWidth(1.3)
-    c.line(left_x, page_h - 70, page_w - left_x, page_h - 70)
+    c.setLineWidth(1.0)
+    c.line(left_x, page_h - BAND_H - 44, page_w - left_x, page_h - BAND_H - 44)
 
     def panel(x: float, top: float, width: float, height: float, title: str) -> float:
         bar_y = _heading(c, x, top, title, width=width)
@@ -388,10 +384,10 @@ def _render_brief(draft: ReportDraft, output_pdf: Path) -> None:
                 continue
             candidates.append(text)
             fingerprints.append(claim_fingerprint(text))
-    candidates = candidates[:5]
+    candidates = candidates[:12]
 
     # -- layout: each block reports its own height, 0 meaning "skip me" ----
-    y = page_h - 80
+    y = page_h - BAND_H - 58
 
     full_inner, col_inner = full_w - 10, col_w - 10
 
@@ -443,7 +439,7 @@ def _render_brief(draft: ReportDraft, output_pdf: Path) -> None:
     )
 
     # Fill the remaining page only with points that fit entirely in the box.
-    bottom = 30.0
+    bottom = 40.0
     available = y - _BAR_H - bottom
     fitted: list[str] = []
     for text in candidates:
@@ -455,9 +451,83 @@ def _render_brief(draft: ReportDraft, output_pdf: Path) -> None:
         lambda x, yy, w: _bullets(c, x, yy, w, fitted),
     )
 
-    c.setFillColor(MUTED)
-    c.setFont("Helvetica", 5.8)
-    c.drawRightString(page_w - left_x, 17, "Page 1 of 2 | Compact version of the full structured report")
+    footer(c, page_w, f"Page 1 of {total_pages} | Compact version of the full structured report")
+    c.save()
+    return sorted({int(n) for text in shown + fitted for n in re.findall(r"\[(\d+)\]", text)})
+
+
+_REF_SIZE, _REF_LEADING, _REF_URL_LEADING = 8.6, 11.5, 9.5
+_REF_TOP = 842.0 - BAND_H - 62
+_REF_BOTTOM = 44.0
+
+
+def _wrap_chars(text: str, width: float, font: str, size: float) -> list[str]:
+    """Wrap on width alone (a URL has no spaces to break at)."""
+    lines, line = [], ""
+    for ch in text:
+        if line and stringWidth(line + ch, font, size) > width:
+            lines.append(line)
+            line = ""
+        line += ch
+    return lines + ([line] if line else [])
+
+
+def _reference_pages(draft: ReportDraft, refs: list[int]) -> list[list[tuple[int, list[str], list[str]]]]:
+    """Cited sources laid out into pages of (number, text lines, url lines)."""
+    by_number = {c.ref_number: c for c in draft.citations}
+    text_w = A4[0] - 36 - 34
+    pages: list[list[tuple[int, list[str], list[str]]]] = [[]]
+    y = _REF_TOP
+    for number in refs:
+        cite = by_number.get(number)
+        if cite is None:
+            continue
+        text = simpleSplit(" ".join(cite.text.split()), "Helvetica", _REF_SIZE, text_w)[:4]
+        url = _wrap_chars(cite.source_url or "", text_w, "Helvetica", 7.4)[:2]
+        height = len(text) * _REF_LEADING + len(url) * _REF_URL_LEADING + 9
+        if y - height < _REF_BOTTOM and pages[-1]:
+            pages.append([])
+            y = _REF_TOP
+        pages[-1].append((number, text, url))
+        y -= height
+    return pages if pages[0] else []
+
+
+def _render_references(draft: ReportDraft, pages, output_pdf: Path, *,
+                       first_page: int, total_pages: int) -> None:
+    page_w, page_h = A4
+    c = Canvas(str(output_pdf), pagesize=A4)
+    c.setTitle(f"{draft.ticker} compact equity brief - references")
+    for index, entries in enumerate(pages):
+        brand_band(c, page_w, page_h, "References", "SOURCES CITED IN THIS BRIEF")
+        c.setFillColor(MUTED)
+        c.setFont("Helvetica", 8.8)
+        c.drawString(18, page_h - BAND_H - 24,
+                     f"{draft.ticker}  |  numbering matches the full report"
+                     + (f"  |  continued ({index + 1} of {len(pages)})" if len(pages) > 1 else ""))
+        y = _REF_TOP
+        for row, (number, text, url) in enumerate(entries):
+            height = len(text) * _REF_LEADING + len(url) * _REF_URL_LEADING + 9
+            if row % 2 == 0:
+                c.setFillColor(ZEBRA)
+                c.rect(18, y - height + 5, page_w - 36, height, fill=1, stroke=0)
+            c.setFillColor(ACCENT)
+            c.setFont("Helvetica-Bold", _REF_SIZE)
+            c.drawString(24, y - 6, f"[{number}]")
+            c.setFillColor(INK)
+            c.setFont("Helvetica", _REF_SIZE)
+            ty = y - 6
+            for line in text:
+                c.drawString(56, ty, line)
+                ty -= _REF_LEADING
+            c.setFillColor(MUTED)
+            c.setFont("Helvetica", 7.4)
+            for line in url:
+                c.drawString(56, ty + 1, line)
+                ty -= _REF_URL_LEADING
+            y -= height
+        footer(c, page_w, f"Page {first_page + index} of {total_pages} | References")
+        c.showPage()
     c.save()
 
 
@@ -468,39 +538,58 @@ def render_compact_report(
     credentials: ProviderCredentials | None = None,
     timeout: int = 30,
 ) -> Path:
-    """Write a two-page brief: one dense research page plus technical analysis.
+    """Write the compact report: brief, technical analysis, then the references.
 
-    The two pages are independent: the brief is built entirely from the
+    The pages are independent: the brief is built entirely from the
     already-validated ReportDraft, while the technical appendix makes its own
     live OHLCV fetch (see technical_appendix.py) and can fail for reasons that
     have nothing to do with the brief - a data-availability gap at MegaAPI,
     not a defect in the report itself. A live-fetch failure there must not
-    also destroy the brief page; it degrades to a one-page compact report
+    also destroy the brief; the references then follow the brief directly
     instead of raising, the same "partial data still yields partial output"
     policy the rest of the pipeline follows.
     """
     report_json = Path(report_json)
     output_pdf = Path(output_pdf)
     draft, _ = load_report_json(report_json)
-    brief_pdf = output_pdf.with_name(f"{output_pdf.stem}_brief.pdf")
-    appendix_pdf = output_pdf.with_name(f"{output_pdf.stem}_appendix.pdf")
-    _render_brief(draft, brief_pdf)
+    stem = output_pdf.stem
+    brief_pdf = output_pdf.with_name(f"{stem}_brief.pdf")
+    appendix_pdf = output_pdf.with_name(f"{stem}_appendix.pdf")
+    refs_pdf = output_pdf.with_name(f"{stem}_refs.pdf")
+    merged_pdf = output_pdf.with_name(f"{stem}_merged.pdf")
+    parts = [brief_pdf]
     try:
-        build_technical_appendix_pdf(
-            draft.ticker or draft.company, draft.report_date, appendix_pdf,
-            page_label="Page 2 of 2", credentials=credentials, timeout=timeout,
-        )
-        return merge_technical_appendix(brief_pdf, appendix_pdf, output_pdf)
-    except Exception as exc:  # noqa: BLE001 - the brief page must still ship
-        logger.warning(
-            "Technical appendix unavailable (%s: %s); shipping the one-page brief alone.",
-            type(exc).__name__, exc,
-        )
-        brief_pdf.replace(output_pdf)
+        # Pass 1 finds which sources the brief cites; pass 2 draws it with the
+        # true page count once the appendix and references are known.
+        refs = _render_brief(draft, brief_pdf, total_pages=1)
+        pages = _reference_pages(draft, refs)
+        has_appendix = True
+        try:
+            build_technical_appendix_pdf(
+                draft.ticker or draft.company, draft.report_date, appendix_pdf,
+                page_label=f"Page 2 of {2 + len(pages)}", credentials=credentials, timeout=timeout,
+            )
+            parts.append(appendix_pdf)
+        except Exception as exc:  # noqa: BLE001 - the brief must still ship
+            has_appendix = False
+            logger.warning(
+                "Technical appendix unavailable (%s: %s); the references follow the brief.",
+                type(exc).__name__, exc,
+            )
+        total = 1 + has_appendix + len(pages)
+        _render_brief(draft, brief_pdf, total_pages=total)
+        if pages:
+            _render_references(draft, pages, refs_pdf, first_page=2 + has_appendix, total_pages=total)
+            parts.append(refs_pdf)
+        merged = parts[0]
+        for extra in parts[1:]:
+            merge_technical_appendix(merged, extra, merged_pdf)
+            merged = merged_pdf
+        merged.replace(output_pdf)
         return output_pdf
     finally:
-        brief_pdf.unlink(missing_ok=True)
-        appendix_pdf.unlink(missing_ok=True)
+        for path in (brief_pdf, appendix_pdf, refs_pdf, merged_pdf):
+            path.unlink(missing_ok=True)
 
 
 def main() -> int:

@@ -15,6 +15,7 @@ from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen.canvas import Canvas
 
 from ..config import ProviderCredentials
+from .brand import COMPANY, draw_logo, footer
 from ..providers.rate_limit import megadata_limiter
 
 
@@ -386,7 +387,7 @@ def build_technical_appendix_pdf(
     keep = 90
     c = Canvas(str(output_pdf), pagesize=A4); page_w, page_h = A4
     def header(page: int, subtitle: str):
-        c.setFillColor(colors.HexColor('#c04f15')); c.rect(0, page_h-52, page_w, 52, fill=1, stroke=0); c.setFillColor(colors.white); c.setFont('Helvetica-Bold', 15); c.drawString(42, page_h-31, f'Technical Appendix — {ticker}'); c.setFont('Helvetica', 8); c.drawRightString(page_w-42, page_h-31, page_label); c.setFillColor(colors.HexColor('#5c6470')); c.setFont('Helvetica', 7); c.drawString(42, page_h-66, subtitle)
+        c.setFillColor(colors.HexColor('#c04f15')); c.rect(0, page_h-52, page_w, 52, fill=1, stroke=0); c.setFillColor(colors.white); c.roundRect(42, page_h-47, 40, 40, 4, fill=1, stroke=0); draw_logo(c, 44, page_h-45, 36); c.setFont('Helvetica-Bold', 7); c.drawString(92, page_h-17, COMPANY.upper()); c.setFont('Helvetica-Bold', 15); c.drawString(92, page_h-38, f'Technical Appendix — {ticker}'); c.setFont('Helvetica', 8); c.drawRightString(page_w-42, page_h-31, page_label); footer(c, page_w, page_label, rule=False); c.setFillColor(colors.HexColor('#5c6470')); c.setFont('Helvetica', 7); c.drawString(42, page_h-66, subtitle)
     header(1, f'Last 90 trading days ending {dates[-1].isoformat()} · {source_label}')
     s = lambda values: values[-keep:]
     price_change = (close[-1] / close[-keep] - 1) * 100

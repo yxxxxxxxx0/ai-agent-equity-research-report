@@ -2,7 +2,7 @@
 
 Pick a ticker and a report date, run the real pipeline against it, watch it
 move through each pipeline stage live, and view the resulting short
-(compact, two-page) report layout in the browser.
+(compact) report layout in the browser.
 
 Usage:
     python webui/app.py
@@ -100,7 +100,7 @@ STAGES: tuple[tuple[str, str, str], ...] = (
     ("synthesis", "Synthesis", "Draft the report's narrative and exhibits"),
     ("qa", "QA", "Check every claim against the evidence store; repair and re-check critical findings"),
     ("pdf", "Render PDF", "Lay out the full report"),
-    ("compact_pdf", "Compact PDF", "Render the two-page short version - runs alongside "
+    ("compact_pdf", "Compact PDF", "Render the short version (brief, technical page, references) - runs alongside "
      "the full PDF"),
 )
 STAGE_KEYS = tuple(key for key, _, _ in STAGES)
@@ -735,7 +735,7 @@ FLOWCHART_HTML = """
     <div class="fc-name">Render PDF</div><div class="fc-blurb">Full report, merged with the technical appendix</div>
   </div>
   <div class="fc-node" data-key="compact_pdf" data-node="compact_pdf" style="left:350px;top:620px;width:280px;height:60px;">
-    <div class="fc-name">Compact PDF</div><div class="fc-blurb">Two-page short version</div>
+    <div class="fc-name">Compact PDF</div><div class="fc-blurb">Brief, technical page, references</div>
   </div>
 </div></div>
 """
