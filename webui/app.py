@@ -859,8 +859,9 @@ APP_STYLE = """
     .ticker-field, .select-wrap, .model-custom, .viewer-pane { background: #10162a; }
     .btn-toggle { background: #171d2c; color: #c3cadb; }
     .btn-toggle.active { background: #e0672a; border-color: #e0672a; color: #fff; }
-    .btn-primary { background: linear-gradient(180deg, #f0803c, #d65a1f); box-shadow: 0 4px 16px rgba(240, 128, 60, 0.3); }
-    .btn-primary:hover { background: linear-gradient(180deg, #f58d4d, #e0672a); }
+    .btn-primary { background: #e0672a; box-shadow: none; }
+    .btn-primary:hover { background: #ea7535; transform: none; }
+    .btn-primary:active { transform: scale(0.97); }
     .brand-title { color: #fff; }
     .qa-group { background: #171d2c; }
     .qa-subject { background: #131a2b; }
