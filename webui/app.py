@@ -1033,7 +1033,7 @@ APP_HTML = """
 <html>
 <head>
   <meta charset="utf-8">
-  <title>EquityAI</title>
+  <title>EQR Report</title>
   <link rel="icon" href="data:,">
   <style>""" + APP_STYLE + """</style>
 </head>
@@ -1041,9 +1041,8 @@ APP_HTML = """
   <div class="shell">
     <header class="brandbar">
       <div class="brand">
-        <div class="brand-title">Equity Research Studio</div>
+        <div class="brand-title">EQR Report</div>
       </div>
-      <div class="tagline-top">Faster insights. Deeper decisions.</div>
     </header>
 
     <div class="stats">
