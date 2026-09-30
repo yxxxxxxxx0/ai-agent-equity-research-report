@@ -44,25 +44,28 @@ You need two things in `.env`:
 
 Start it with `python webui/app.py` and open **http://127.0.0.1:5050**. Stop it with
 `Ctrl+C` in the terminal. Jobs live in the server's memory, so restarting the server
-clears the page; the finished files stay on disk (see section 6).
+clears the lists; the finished files stay on disk (see section 6).
 
-The page fits on one screen: steps 1 and 2 on the left, the report viewer and QA review in the middle,
-and the workflow map on the right.
+There are two pages. The **home page** (`/`) is where you start a report. Pressing Generate takes you to
+the **run page** (`/job/<id>`), which fits on one screen: 1 (the run) and 2 (the steps) on the left, 3 (the
+report viewer) and 4 (QA review) in the middle, and the workflow map on the right. The home page also lists
+this session's recent runs, so you can get back to a run page; an old link after a server restart just
+returns you to the home page.
 
-**Generate a report**
+**Generate a report** (home page)
 
-1. **Enter a ticker** in box 1, for example `NVDA`, `AAPL` or `TSLA`.
+1. **Enter a ticker**, for example `NVDA`, `AAPL` or `TSLA` (Enter also starts the run).
 2. **Choose a model** in the *Model* dropdown. It lists curated OpenRouter models with
    live prices per 1M tokens. Your `.env` model is marked *(default)*. Pick
    *Custom model id…* to type any exact OpenRouter id (for example
    `openai/gpt-5.6-sol`); an id OpenRouter does not list is rejected. The chosen model
    is used for **every** LLM stage of that run. A stronger model writes better but costs
    more; the price line under the dropdown shows the trade-off.
-3. Click **Generate Reports**. The model dropdown locks until the run finishes. A run
-   typically takes several minutes.
-4. To cancel, click **Stop run**, which appears under the ticker box while a run is active. The
-   run stops at its next step and the page returns to ready. A model call already in flight still
-   finishes and is billed, but its result is discarded.
+3. Click **Generate Reports**. You are taken to the run page while the run continues. A run typically
+   takes several minutes.
+4. To cancel, click **Stop run** in card 1 of the run page. The run stops at its next step and is marked
+   *Stopped*. A model call already in flight still finishes and is billed, but its result is discarded.
+   **New report** in the same card takes you back to the home page.
 
 **Watch it run**
 
@@ -93,7 +96,7 @@ and the workflow map on the right.
   - **Pipeline notices**: run warnings and errors, for example a technical appendix that
     could not be built.
 
-**Resume a previous run**: click *Resume a previous run instead*, paste a run id such as
+**Resume a previous run** (home page): click *Resume a previous run instead*, paste a run id such as
 `run_20260929T060809_f9cebb` (the folder name under `output_webui/runs/`), and press
 *Resume*. It re-runs analysis, synthesis, QA and rendering from that run's saved plan and
 evidence, so there is no new planning or data acquisition. It is useful for retrying after

@@ -431,6 +431,7 @@ def _start_job(
             "ticker": ticker or (f"Resuming {resume_from}" if resume_from else ""),
             "report_date": report_date.isoformat() if report_date else None,
             "resume_from": resume_from,
+            "created_at": time.time(),
             "model": model or Settings.from_env().model.model,
             "status": "queued",
             "active_stages": [],
@@ -446,7 +447,17 @@ def _start_job(
 
 @app.route("/", methods=["GET"])
 def index():
-    return render_template_string(APP_HTML, initial_job_id=None)
+    return render_template_string(HOME_HTML)
+
+
+@app.route("/api/jobs", methods=["GET"])
+def api_jobs():
+    """This session's runs, newest first, for the home page's Recent runs list."""
+    with _JOBS_LOCK:
+        rows = [{"job_id": job_id, "ticker": job.get("ticker"), "status": job.get("status"),
+                 "model": job.get("model"), "created_at": job.get("created_at") or job.get("started_at") or 0}
+                for job_id, job in JOBS.items()]
+    return jsonify({"jobs": sorted(rows, key=lambda r: -r["created_at"])[:12]})
 
 
 @app.route("/generate", methods=["POST"])
@@ -602,7 +613,8 @@ def logo():
 @app.route("/job/<job_id>", methods=["GET"])
 def job_page(job_id: str):
     if job_id not in JOBS:
-        return "Unknown job.", 404
+        # Jobs live in the server's memory, so an old link after a restart lands here.
+        return redirect(url_for("index"))
     return render_template_string(APP_HTML, initial_job_id=job_id)
 
 
@@ -1145,6 +1157,17 @@ APP_STYLE = """
       .viewer-card { min-height: 520px; }
       .map-card { min-height: 560px; }
     }
+    .run-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .run-top h2 { margin: 0; }
+    .run-ticker { font-size: 34px; font-weight: 800; letter-spacing: -0.02em; color: #fff; margin: 12px 0 6px; line-height: 1.1; word-break: break-all; }
+    .run-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .run-model { font-family: var(--font-mono); font-size: 12.5px; color: var(--muted); }
+    .run-detail { margin-top: 8px; font-size: 12px; color: var(--faint); word-break: break-all; }
+    .run-badge { font-size: 12px; font-weight: 800; padding: 3px 11px; border-radius: 99px; border: 1px solid transparent; }
+    .run-badge.run { background: var(--blue-soft); color: #ffb98a; border-color: var(--blue-ring); }
+    .run-badge.ok { background: var(--pos-bg); color: var(--pos); border-color: #1d5a49; }
+    .run-badge.bad { background: var(--neg-bg); color: var(--neg-ink); border-color: #5b2a33; }
+    .run-badge.idle { background: #222a40; color: var(--ink-soft); border-color: var(--border); }
     .error-note, .qa-note { background: #2c1a1f; border-color: #5b2a33; color: #fca5a5; }
 """
 
@@ -1299,42 +1322,12 @@ APP_HTML = """
 
     <div class="layout dash">
       <div class="col col-a">
-        <div class="card">
-          <h2>1. Enter Ticker</h2>
-          <p class="hint">Generate a full and compact equity research report.</p>
-          <div class="ticker-row">
-            <div class="ticker-field">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-              <input id="ticker" placeholder="AAPL" autocomplete="off" maxlength="10">
-            </div>
-            <button id="generate-btn" class="btn btn-primary" onclick="generateReports()">
-              Generate Reports
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
-            </button>
-          </div>
+        <div class="card run-card">
+          <div class="run-top"><h2>1. Run</h2><a class="btn btn-toggle" href="/">&larr; New report</a></div>
+          <div class="run-ticker" id="run-ticker">&mdash;</div>
+          <div class="run-meta"><span class="run-badge run" id="run-status">Starting</span><span class="run-model" id="run-model"></span></div>
+          <div class="run-detail" id="run-detail"></div>
           <button type="button" id="stop-btn" class="btn btn-stop" onclick="stopRun()" style="display:none">&#9632; Stop run</button>
-          <p class="example-hint">e.g. AAPL, MSFT, NVDA, TSLA</p>
-          <div class="model-block">
-            <label class="field-label" for="model-select">Model</label>
-            <div class="select-wrap">
-              <select id="model-select" onchange="onModelChange()" tabindex="-1" aria-hidden="true"><option>Loading models&hellip;</option></select>
-              <button type="button" id="model-btn" class="dd-btn" onclick="toggleDD(event)" aria-haspopup="listbox"><span id="model-btn-label">Loading models&hellip;</span></button>
-              <div class="dd-list" id="model-list" role="listbox" hidden></div>
-            </div>
-            <input id="model-custom" class="model-custom" placeholder="provider/model-id, e.g. openai/gpt-5.6-sol" autocomplete="off" style="display:none;">
-            <p class="model-price" id="model-price">Used for every LLM stage of the run.</p>
-          </div>
-          <p class="resume-toggle"><a href="#" onclick="toggleResumeRow(event)" id="resume-link">Resume a previous run instead</a></p>
-          <div class="ticker-row resume-row" id="resume-row" style="display:none;">
-            <div class="ticker-field">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"></polyline><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path></svg>
-              <input id="resume-run-id" placeholder="run_20260929T060809_f9cebb" autocomplete="off">
-            </div>
-            <button id="resume-btn" class="btn btn-primary" onclick="resumeReport()">
-              Resume
-            </button>
-          </div>
-          <p class="example-hint resume-row" id="resume-hint" style="display:none;">Re-runs analysis, synthesis, QA and rendering for an existing run_id, reusing its already-fetched evidence - no re-planning or re-acquisition.</p>
         </div>
 
         <div class="card">
@@ -1401,90 +1394,6 @@ APP_HTML = """
     let jobId = """ + "{{ initial_job_id | tojson }}" + """;
     let pollTimer = null;
     let tickTimer = null;
-    let MODELS = [];
-
-    function fmtPrice(m) {
-      return m.price ? `$${m.price[0]} in / $${m.price[1]} out per 1M tokens` : "price unavailable";
-    }
-
-    async function loadModels() {
-      const sel = document.getElementById("model-select");
-      try {
-        MODELS = (await (await fetch("/api/models")).json()).models || [];
-      } catch (err) { MODELS = []; }
-      sel.innerHTML = MODELS.map(m =>
-        `<option value="${m.id}">${m.id}${m.default ? "  (default)" : ""}</option>`).join("")
-        + `<option value="__custom__">Custom model id&hellip;</option>`;
-      const current = window.__lastJob && window.__lastJob.model;
-      if (current && MODELS.some(m => m.id === current)) sel.value = current;
-      onModelChange();
-      buildDD();
-    }
-
-    function buildDD() {
-      const sel = document.getElementById("model-select");
-      const list = document.getElementById("model-list");
-      const price = m => m.price ? `$${m.price[0]} / $${m.price[1]}` : "";
-      list.innerHTML = MODELS.map(m => `<div class="dd-item" role="option" data-v="${esc(m.id)}">
-          <span>${esc(m.id)}${m.default ? " &middot; default" : ""}</span><span class="dd-price">${price(m)}</span></div>`).join("")
-        + `<div class="dd-sep"></div><div class="dd-item" role="option" data-v="__custom__"><span>Custom model id&hellip;</span></div>`;
-      list.querySelectorAll(".dd-item").forEach(el => el.onclick = () => chooseDD(el.dataset.v));
-      syncDD();
-    }
-
-    function syncDD() {
-      const sel = document.getElementById("model-select");
-      const label = document.getElementById("model-btn-label");
-      const opt = sel.options[sel.selectedIndex];
-      label.textContent = opt ? opt.text.replace("  (default)", " (default)") : "";
-      document.querySelectorAll("#model-list .dd-item").forEach(
-        el => el.classList.toggle("selected", el.dataset.v === sel.value));
-      document.querySelector(".select-wrap").classList.toggle("disabled", sel.disabled);
-    }
-
-    function closeDD() {
-      document.getElementById("model-list").hidden = true;
-      document.querySelector(".select-wrap").classList.remove("open");
-    }
-
-    function toggleDD(evt) {
-      evt.stopPropagation();
-      const sel = document.getElementById("model-select");
-      const list = document.getElementById("model-list");
-      if (sel.disabled) return;
-      list.hidden = !list.hidden;
-      document.querySelector(".select-wrap").classList.toggle("open", !list.hidden);
-    }
-
-    function chooseDD(value) {
-      const sel = document.getElementById("model-select");
-      sel.value = value;
-      onModelChange();
-      syncDD();
-      closeDD();
-      if (value === "__custom__") document.getElementById("model-custom").focus();
-    }
-
-    document.addEventListener("click", closeDD);
-    document.addEventListener("keydown", e => { if (e.key === "Escape") closeDD(); });
-
-    function selectedModel() {
-      const sel = document.getElementById("model-select");
-      return sel.value === "__custom__"
-        ? document.getElementById("model-custom").value.trim() : sel.value;
-    }
-
-    function onModelChange() {
-      const sel = document.getElementById("model-select");
-      const custom = document.getElementById("model-custom");
-      const price = document.getElementById("model-price");
-      custom.style.display = sel.value === "__custom__" ? "block" : "none";
-      const m = MODELS.find(x => x.id === sel.value);
-      price.textContent = m
-        ? `${m.name} - ${fmtPrice(m)}. Used for every LLM stage of the run.`
-        : "Enter an exact OpenRouter model id. Used for every LLM stage of the run.";
-    }
-
     // Every timestamp driving the UI's clocks comes from the server
     // (job.started_at, job.stage_first_started_at, job.stage_completed_at -
     // all wall-clock seconds recorded once, server-side, the first time each
@@ -1657,7 +1566,7 @@ APP_HTML = """
       }
       costEl.textContent = job && job.cost_usd != null ? "$" + job.cost_usd.toFixed(2) : "$0.00";
       const modelEl = document.getElementById("t-model");
-      if (modelEl) modelEl.textContent = (job && job.model) || selectedModel() || "\u2014";
+      if (modelEl) modelEl.textContent = (job && job.model) || "\u2014";
       const total = job ? (job.input_tokens || 0) + (job.output_tokens || 0) : 0;
       tokensEl.textContent = total ? total.toLocaleString() : "—";
     }
@@ -1974,71 +1883,24 @@ APP_HTML = """
       body.innerHTML = html || `<div class="qa-empty">QA ran and raised nothing.</div>`;
     }
 
-    function toggleResumeRow(evt) {
-      evt.preventDefault();
-      const row = document.getElementById("resume-row");
-      const hint = document.getElementById("resume-hint");
-      const shown = row.style.display !== "none";
-      row.style.display = shown ? "none" : "flex";
-      hint.style.display = shown ? "none" : "block";
-      document.getElementById("resume-link").textContent =
-        shown ? "Resume a previous run instead" : "Start a new report instead";
-    }
+    const STATUS_LABEL = {
+      queued: ["Queued", "run"], running: ["Running", "run"], stopping: ["Stopping...", "run"],
+      done: ["Done", "ok"], failed: ["Failed", "bad"], stopped: ["Stopped", "idle"],
+    };
 
-    async function resumeReport() {
-      const runId = document.getElementById("resume-run-id").value.trim();
-      if (!runId) return;
-      const btn = document.getElementById("resume-btn");
-      btn.disabled = true;
-      stepStartedAt = {};
-      try {
-        const res = await fetch("/api/generate", {
-          method: "POST", headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({resume_from: runId, model: selectedModel()}),
-        });
-        const body = await res.json();
-        if (!res.ok) {
-          alert(body.error || "Could not start the resume run.");
-          btn.disabled = false;
-          return;
-        }
-        jobId = body.job_id;
-        history.replaceState(null, "", `/job/${jobId}`);
-        renderSteps(null);
-        renderViewer({status: "running", ticker: `Resuming ${runId}`});
-        poll();
-      } catch (err) {
-        alert("Could not reach the server: " + err);
-        btn.disabled = false;
-      }
-    }
-
-    async function generateReports() {
-      const ticker = document.getElementById("ticker").value.trim().toUpperCase();
-      if (!ticker) return;
-      const btn = document.getElementById("generate-btn");
-      btn.disabled = true;
-      stepStartedAt = {};
-      try {
-        const res = await fetch("/api/generate", {
-          method: "POST", headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({ticker, model: selectedModel()}),
-        });
-        const body = await res.json();
-        if (!res.ok) {
-          alert(body.error || "Could not start the report.");
-          btn.disabled = false;
-          return;
-        }
-        jobId = body.job_id;
-        history.replaceState(null, "", `/job/${jobId}`);
-        renderSteps(null);
-        renderViewer({status: "running", ticker});
-        poll();
-      } catch (err) {
-        alert("Could not reach the server: " + err);
-        btn.disabled = false;
-      }
+    function updateRunCard(job) {
+      const s = STATUS_LABEL[job.status] || [job.status, "idle"];
+      const badge = document.getElementById("run-status");
+      badge.textContent = s[0];
+      badge.className = "run-badge " + s[1];
+      document.getElementById("run-ticker").textContent = job.ticker || "\u2014";
+      document.getElementById("run-model").textContent = job.model || "";
+      document.getElementById("run-detail").textContent =
+        [job.report_date ? "Report date " + job.report_date : "", job.report_run_id || ""].filter(Boolean).join("  \u00b7  ");
+      const stopBtn = document.getElementById("stop-btn");
+      stopBtn.style.display = isFinished(job) ? "none" : "flex";
+      stopBtn.disabled = job.status === "stopping";
+      stopBtn.innerHTML = job.status === "stopping" ? "Stopping&hellip;" : "&#9632; Stop run";
     }
 
     async function poll() {
@@ -2051,35 +1913,251 @@ APP_HTML = """
       renderViewer(job);
       renderQA(job);
       updateTelemetry(job);
-      const btn = document.getElementById("generate-btn");
-      const modelSel = document.getElementById("model-select");
-      if (job.model && MODELS.some(m => m.id === job.model)) { modelSel.value = job.model; onModelChange(); }
-      modelSel.disabled = !isFinished(job);
-      const stopBtn = document.getElementById("stop-btn");
-      const active = !isFinished(job);
-      stopBtn.style.display = active ? "flex" : "none";
-      stopBtn.disabled = job.status === "stopping";
-      stopBtn.innerHTML = job.status === "stopping" ? "Stopping&hellip;" : "&#9632; Stop run";
-      syncDD();
-      if (job.ticker && !job.resume_from) document.getElementById("ticker").value = job.ticker;
-      if (job.resume_from) document.getElementById("resume-run-id").value = job.resume_from;
-
+      updateRunCard(job);
       if (isFinished(job)) {
-        btn.disabled = false;
         renderCostByLayer(job);
         clearTimeout(pollTimer);
         return;
       }
-      btn.disabled = true;
       pollTimer = setTimeout(poll, 1200);
     }
 
     renderSteps(null);
     renderQA(null);
     fitMap();
-    loadModels();
     tickTimer = setInterval(tickTimes, 1000);
     if (jobId) { renderViewer({status: "running"}); poll(); }
+  </script>
+</body>
+</html>
+"""
+
+
+HOME_HTML = """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EQR Report</title>
+  <link rel="icon" href="data:,">
+  <style>""" + APP_STYLE + """
+    body { overflow: auto; }
+    .home { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; padding: 28px 16px; }
+    .home-title { font-size: 46px; font-weight: 800; letter-spacing: -0.03em; color: #fff; text-align: center; line-height: 1.1; }
+    .home-sub { color: var(--muted); font-size: 15px; margin-top: 8px; text-align: center; }
+    .home-card { width: min(560px, 100%); margin: 0; }
+    .job-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; margin-top: 8px; border: 1px solid var(--border);
+      border-radius: 10px; text-decoration: none; color: var(--ink); background: #10162a; }
+    .job-row:hover { border-color: var(--blue); background: #1b2236; }
+    .job-tk { font-weight: 800; font-size: 15px; min-width: 64px; }
+    .job-meta { flex: 1; font-size: 12px; color: var(--muted); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <main class="home">
+    <div>
+      <div class="home-title">EQR Report</div>
+      <div class="home-sub">Generate a full and compact equity research report.</div>
+    </div>
+
+    <div class="home-card">
+        <div class="card">
+          <h2>Start a report</h2>
+          <div class="ticker-row">
+            <div class="ticker-field">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+              <input id="ticker" placeholder="AAPL" autocomplete="off" maxlength="10">
+            </div>
+            <button id="generate-btn" class="btn btn-primary" onclick="generateReports()">
+              Generate Reports
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+            </button>
+          </div>
+          <p class="example-hint">e.g. AAPL, MSFT, NVDA, TSLA</p>
+          <div class="model-block">
+            <label class="field-label" for="model-select">Model</label>
+            <div class="select-wrap">
+              <select id="model-select" onchange="onModelChange()" tabindex="-1" aria-hidden="true"><option>Loading models&hellip;</option></select>
+              <button type="button" id="model-btn" class="dd-btn" onclick="toggleDD(event)" aria-haspopup="listbox"><span id="model-btn-label">Loading models&hellip;</span></button>
+              <div class="dd-list" id="model-list" role="listbox" hidden></div>
+            </div>
+            <input id="model-custom" class="model-custom" placeholder="provider/model-id, e.g. openai/gpt-5.6-sol" autocomplete="off" style="display:none;">
+            <p class="model-price" id="model-price">Used for every LLM stage of the run.</p>
+          </div>
+          <p class="resume-toggle"><a href="#" onclick="toggleResumeRow(event)" id="resume-link">Resume a previous run instead</a></p>
+          <div class="ticker-row resume-row" id="resume-row" style="display:none;">
+            <div class="ticker-field">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"></polyline><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path></svg>
+              <input id="resume-run-id" placeholder="run_20260929T060809_f9cebb" autocomplete="off">
+            </div>
+            <button id="resume-btn" class="btn btn-primary" onclick="resumeReport()">
+              Resume
+            </button>
+          </div>
+          <p class="example-hint resume-row" id="resume-hint" style="display:none;">Re-runs analysis, synthesis, QA and rendering for an existing run_id, reusing its already-fetched evidence - no re-planning or re-acquisition.</p>
+        </div>
+
+    </div>
+    <div class="card home-card" id="recent" style="display:none">
+      <h2>Recent runs</h2>
+      <div id="recent-list"></div>
+    </div>
+  </main>
+
+  <script>
+    function esc(s) {
+      return String(s == null ? "" : s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+    }
+
+    let MODELS = [];
+
+    function fmtPrice(m) {
+      return m.price ? `$${m.price[0]} in / $${m.price[1]} out per 1M tokens` : "price unavailable";
+    }
+
+    async function loadModels() {
+      const sel = document.getElementById("model-select");
+      try {
+        MODELS = (await (await fetch("/api/models")).json()).models || [];
+      } catch (err) { MODELS = []; }
+      sel.innerHTML = MODELS.map(m =>
+        `<option value="${m.id}">${m.id}${m.default ? "  (default)" : ""}</option>`).join("")
+        + `<option value="__custom__">Custom model id&hellip;</option>`;
+      const current = window.__lastJob && window.__lastJob.model;
+      if (current && MODELS.some(m => m.id === current)) sel.value = current;
+      onModelChange();
+      buildDD();
+    }
+
+    function buildDD() {
+      const sel = document.getElementById("model-select");
+      const list = document.getElementById("model-list");
+      const price = m => m.price ? `$${m.price[0]} / $${m.price[1]}` : "";
+      list.innerHTML = MODELS.map(m => `<div class="dd-item" role="option" data-v="${esc(m.id)}">
+          <span>${esc(m.id)}${m.default ? " &middot; default" : ""}</span><span class="dd-price">${price(m)}</span></div>`).join("")
+        + `<div class="dd-sep"></div><div class="dd-item" role="option" data-v="__custom__"><span>Custom model id&hellip;</span></div>`;
+      list.querySelectorAll(".dd-item").forEach(el => el.onclick = () => chooseDD(el.dataset.v));
+      syncDD();
+    }
+
+    function syncDD() {
+      const sel = document.getElementById("model-select");
+      const label = document.getElementById("model-btn-label");
+      const opt = sel.options[sel.selectedIndex];
+      label.textContent = opt ? opt.text.replace("  (default)", " (default)") : "";
+      document.querySelectorAll("#model-list .dd-item").forEach(
+        el => el.classList.toggle("selected", el.dataset.v === sel.value));
+      document.querySelector(".select-wrap").classList.toggle("disabled", sel.disabled);
+    }
+
+    function closeDD() {
+      document.getElementById("model-list").hidden = true;
+      document.querySelector(".select-wrap").classList.remove("open");
+    }
+
+    function toggleDD(evt) {
+      evt.stopPropagation();
+      const sel = document.getElementById("model-select");
+      const list = document.getElementById("model-list");
+      if (sel.disabled) return;
+      list.hidden = !list.hidden;
+      document.querySelector(".select-wrap").classList.toggle("open", !list.hidden);
+    }
+
+    function chooseDD(value) {
+      const sel = document.getElementById("model-select");
+      sel.value = value;
+      onModelChange();
+      syncDD();
+      closeDD();
+      if (value === "__custom__") document.getElementById("model-custom").focus();
+    }
+
+    document.addEventListener("click", closeDD);
+    document.addEventListener("keydown", e => { if (e.key === "Escape") closeDD(); });
+
+    function selectedModel() {
+      const sel = document.getElementById("model-select");
+      return sel.value === "__custom__"
+        ? document.getElementById("model-custom").value.trim() : sel.value;
+    }
+
+    function onModelChange() {
+      const sel = document.getElementById("model-select");
+      const custom = document.getElementById("model-custom");
+      const price = document.getElementById("model-price");
+      custom.style.display = sel.value === "__custom__" ? "block" : "none";
+      const m = MODELS.find(x => x.id === sel.value);
+      price.textContent = m
+        ? `${m.name} - ${fmtPrice(m)}. Used for every LLM stage of the run.`
+        : "Enter an exact OpenRouter model id. Used for every LLM stage of the run.";
+    }
+
+
+    function toggleResumeRow(evt) {
+      evt.preventDefault();
+      const row = document.getElementById("resume-row");
+      const hint = document.getElementById("resume-hint");
+      const shown = row.style.display !== "none";
+      row.style.display = shown ? "none" : "flex";
+      hint.style.display = shown ? "none" : "block";
+      document.getElementById("resume-link").textContent =
+        shown ? "Resume a previous run instead" : "Start a new report instead";
+    }
+
+    async function start(payload, btn, failure) {
+      btn.disabled = true;
+      try {
+        const res = await fetch("/api/generate", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(Object.assign(payload, {model: selectedModel()})),
+        });
+        const body = await res.json();
+        if (!res.ok) {
+          alert(body.error || failure);
+          btn.disabled = false;
+          return;
+        }
+        window.location.href = `/job/${body.job_id}`;
+      } catch (err) {
+        alert("Could not reach the server: " + err);
+        btn.disabled = false;
+      }
+    }
+
+    function generateReports() {
+      const ticker = document.getElementById("ticker").value.trim().toUpperCase();
+      if (ticker) start({ticker}, document.getElementById("generate-btn"), "Could not start the report.");
+    }
+
+    function resumeReport() {
+      const runId = document.getElementById("resume-run-id").value.trim();
+      if (runId) start({resume_from: runId}, document.getElementById("resume-btn"), "Could not start the resume run.");
+    }
+
+    document.getElementById("ticker").addEventListener("keydown", e => { if (e.key === "Enter") generateReports(); });
+
+    const BADGE = {queued: ["Queued", "run"], running: ["Running", "run"], stopping: ["Stopping", "run"],
+      done: ["Done", "ok"], failed: ["Failed", "bad"], stopped: ["Stopped", "idle"]};
+
+    async function loadRecent() {
+      try {
+        const jobs = (await (await fetch("/api/jobs")).json()).jobs || [];
+        if (!jobs.length) return;
+        document.getElementById("recent").style.display = "block";
+        document.getElementById("recent-list").innerHTML = jobs.map(j => {
+          const b = BADGE[j.status] || [j.status, "idle"];
+          const when = j.created_at ? new Date(j.created_at * 1000).toLocaleTimeString() : "";
+          return `<a class="job-row" href="/job/${esc(j.job_id)}"><span class="job-tk">${esc(j.ticker || "run")}</span>
+            <span class="job-meta">${esc(j.model || "")} &middot; ${esc(when)}</span>
+            <span class="run-badge ${b[1]}">${b[0]}</span></a>`;
+        }).join("");
+      } catch (err) { /* the list is a convenience */ }
+    }
+
+    loadModels();
+    loadRecent();
   </script>
 </body>
 </html>
