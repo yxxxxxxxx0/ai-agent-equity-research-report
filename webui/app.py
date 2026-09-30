@@ -876,6 +876,33 @@ APP_STYLE = """
     .fc-node.current, .fc-node.fc-gate { background: #3a2418; }
     .fc-time { background: transparent; }
     .step-dot { background: var(--card-bg); }
+    .select-wrap select { display: none; }
+    .dd-btn {
+      width: 100%; text-align: left; border: none; background: transparent; cursor: pointer;
+      padding: 11px 36px 11px 12px; font-size: 14px; font-weight: 600; color: var(--ink);
+      font-family: var(--font-ui); border-radius: 9px;
+    }
+    .dd-btn:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--blue-ring); }
+    .select-wrap.disabled .dd-btn { opacity: 0.6; cursor: default; }
+    .select-wrap.open { border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-ring); }
+    .select-wrap.open::after { transform: translateY(-30%) rotate(225deg); }
+    .dd-list {
+      position: absolute; z-index: 30; top: calc(100% + 8px); left: -1px; right: -1px;
+      max-height: 340px; overflow-y: auto; padding: 6px;
+      background: #1b2236; border: 1px solid #36405e; border-radius: 12px;
+      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.55);
+    }
+    .dd-list[hidden] { display: none; }
+    .dd-item {
+      display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+      padding: 9px 11px; border-radius: 8px; cursor: pointer; color: var(--ink-soft);
+      font-size: 13.5px; font-weight: 600; border-left: 3px solid transparent;
+    }
+    .dd-item:hover { background: #2a3350; color: #fff; }
+    .dd-item.selected { background: #3a2418; color: #ffb98a; border-left-color: #e0672a; }
+    .dd-price { font-family: var(--font-mono); font-size: 11.5px; font-weight: 500; color: var(--faint); white-space: nowrap; }
+    .dd-item.selected .dd-price { color: #d99a78; }
+    .dd-sep { height: 1px; background: #2c3553; margin: 5px 4px; }
     .error-note, .qa-note { background: #2c1a1f; border-color: #5b2a33; color: #fca5a5; }
 """
 
@@ -1045,7 +1072,9 @@ APP_HTML = """
           <div class="model-block">
             <label class="field-label" for="model-select">Model</label>
             <div class="select-wrap">
-              <select id="model-select" onchange="onModelChange()"><option>Loading models&hellip;</option></select>
+              <select id="model-select" onchange="onModelChange()" tabindex="-1" aria-hidden="true"><option>Loading models&hellip;</option></select>
+              <button type="button" id="model-btn" class="dd-btn" onclick="toggleDD(event)" aria-haspopup="listbox"><span id="model-btn-label">Loading models&hellip;</span></button>
+              <div class="dd-list" id="model-list" role="listbox" hidden></div>
             </div>
             <input id="model-custom" class="model-custom" placeholder="provider/model-id, e.g. openai/gpt-5.6-sol" autocomplete="off" style="display:none;">
             <p class="model-price" id="model-price">Used for every LLM stage of the run.</p>
@@ -1133,7 +1162,55 @@ APP_HTML = """
       const current = window.__lastJob && window.__lastJob.model;
       if (current && MODELS.some(m => m.id === current)) sel.value = current;
       onModelChange();
+      buildDD();
     }
+
+    function buildDD() {
+      const sel = document.getElementById("model-select");
+      const list = document.getElementById("model-list");
+      const price = m => m.price ? `$${m.price[0]} / $${m.price[1]}` : "";
+      list.innerHTML = MODELS.map(m => `<div class="dd-item" role="option" data-v="${esc(m.id)}">
+          <span>${esc(m.id)}${m.default ? " &middot; default" : ""}</span><span class="dd-price">${price(m)}</span></div>`).join("")
+        + `<div class="dd-sep"></div><div class="dd-item" role="option" data-v="__custom__"><span>Custom model id&hellip;</span></div>`;
+      list.querySelectorAll(".dd-item").forEach(el => el.onclick = () => chooseDD(el.dataset.v));
+      syncDD();
+    }
+
+    function syncDD() {
+      const sel = document.getElementById("model-select");
+      const label = document.getElementById("model-btn-label");
+      const opt = sel.options[sel.selectedIndex];
+      label.textContent = opt ? opt.text.replace("  (default)", " (default)") : "";
+      document.querySelectorAll("#model-list .dd-item").forEach(
+        el => el.classList.toggle("selected", el.dataset.v === sel.value));
+      document.querySelector(".select-wrap").classList.toggle("disabled", sel.disabled);
+    }
+
+    function closeDD() {
+      document.getElementById("model-list").hidden = true;
+      document.querySelector(".select-wrap").classList.remove("open");
+    }
+
+    function toggleDD(evt) {
+      evt.stopPropagation();
+      const sel = document.getElementById("model-select");
+      const list = document.getElementById("model-list");
+      if (sel.disabled) return;
+      list.hidden = !list.hidden;
+      document.querySelector(".select-wrap").classList.toggle("open", !list.hidden);
+    }
+
+    function chooseDD(value) {
+      const sel = document.getElementById("model-select");
+      sel.value = value;
+      onModelChange();
+      syncDD();
+      closeDD();
+      if (value === "__custom__") document.getElementById("model-custom").focus();
+    }
+
+    document.addEventListener("click", closeDD);
+    document.addEventListener("keydown", e => { if (e.key === "Escape") closeDD(); });
 
     function selectedModel() {
       const sel = document.getElementById("model-select");
@@ -1497,6 +1574,7 @@ APP_HTML = """
       const modelSel = document.getElementById("model-select");
       if (job.model && MODELS.some(m => m.id === job.model)) { modelSel.value = job.model; onModelChange(); }
       modelSel.disabled = job.status !== "done" && job.status !== "failed";
+      syncDD();
       if (job.ticker && !job.resume_from) document.getElementById("ticker").value = job.ticker;
       if (job.resume_from) document.getElementById("resume-run-id").value = job.resume_from;
 
